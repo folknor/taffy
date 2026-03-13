@@ -12,6 +12,8 @@ mod flex;
 mod float;
 #[cfg(feature = "grid")]
 mod grid;
+#[cfg(feature = "table_layout")]
+mod table;
 
 pub use self::alignment::{AlignContent, AlignItems, AlignSelf, JustifyContent, JustifyItems, JustifySelf};
 pub use self::available_space::AvailableSpace;
@@ -31,6 +33,8 @@ pub use self::grid::{
     GridItemStyle, GridPlacement, GridTemplateComponent, GridTemplateRepetition, MaxTrackSizingFunction,
     MinTrackSizingFunction, RepetitionCount, TrackSizingFunction,
 };
+#[cfg(feature = "table_layout")]
+pub use self::table::{TableContainerStyle, TableItemStyle};
 #[cfg(feature = "grid")]
 pub(crate) use self::grid::{GridAreaAxis, GridAreaEnd};
 #[cfg(feature = "grid")]
@@ -182,6 +186,18 @@ pub enum Display {
     /// The children will follow the CSS Grid layout algorithm
     #[cfg(feature = "grid")]
     Grid,
+    /// The children will follow the CSS Table layout algorithm (table wrapper box)
+    #[cfg(feature = "table_layout")]
+    Table,
+    /// A table row group (<thead>, <tbody>, <tfoot>)
+    #[cfg(feature = "table_layout")]
+    TableRowGroup,
+    /// A table row (<tr>)
+    #[cfg(feature = "table_layout")]
+    TableRow,
+    /// A table cell (<td>, <th>)
+    #[cfg(feature = "table_layout")]
+    TableCell,
     /// The node is hidden, and it's children will also be hidden
     None,
 }
@@ -220,6 +236,14 @@ impl core::fmt::Display for Display {
             Display::Flex => write!(f, "FLEX"),
             #[cfg(feature = "grid")]
             Display::Grid => write!(f, "GRID"),
+            #[cfg(feature = "table_layout")]
+            Display::Table => write!(f, "TABLE"),
+            #[cfg(feature = "table_layout")]
+            Display::TableRowGroup => write!(f, "TABLE-ROW-GROUP"),
+            #[cfg(feature = "table_layout")]
+            Display::TableRow => write!(f, "TABLE-ROW"),
+            #[cfg(feature = "table_layout")]
+            Display::TableCell => write!(f, "TABLE-CELL"),
         }
     }
 }
@@ -451,6 +475,15 @@ pub struct Style<S: CheapCloneStr = DefaultCheapStr> {
     #[cfg_attr(feature = "serde", serde(default = "style_helpers::zero"))]
     pub gap: Size<LengthPercentage>,
 
+    // Table container properties
+    /// The spacing between table cells (maps to CSS border-spacing / HTML cellspacing)
+    #[cfg(feature = "table_layout")]
+    #[cfg_attr(feature = "serde", serde(default = "style_helpers::zero"))]
+    pub border_spacing: Size<LengthPercentage>,
+    /// The number of columns this cell spans (colspan attribute)
+    #[cfg(feature = "table_layout")]
+    pub colspan: u16,
+
     // Block container properties
     /// How items elements should aligned in the inline axis
     #[cfg(feature = "block_layout")]
@@ -554,6 +587,11 @@ impl<S: CheapCloneStr> Style<S> {
         align_content: None,
         #[cfg(any(feature = "flexbox", feature = "grid"))]
         justify_content: None,
+        // Table
+        #[cfg(feature = "table_layout")]
+        border_spacing: Size::zero(),
+        #[cfg(feature = "table_layout")]
+        colspan: 1,
         // Block
         #[cfg(feature = "block_layout")]
         text_align: TextAlign::Auto,
@@ -611,7 +649,14 @@ impl<S: CheapCloneStr> CoreStyle for Style<S> {
     #[inline(always)]
     #[cfg(feature = "block_layout")]
     fn is_block(&self) -> bool {
-        matches!(self.display, Display::Block)
+        #[cfg(feature = "table_layout")]
+        {
+            matches!(self.display, Display::Block | Display::Table | Display::TableRowGroup | Display::TableRow | Display::TableCell)
+        }
+        #[cfg(not(feature = "table_layout"))]
+        {
+            matches!(self.display, Display::Block)
+        }
     }
     #[inline(always)]
     fn is_compressible_replaced(&self) -> bool {
@@ -785,6 +830,58 @@ impl<T: BlockItemStyle> BlockItemStyle for &'_ T {
     #[inline(always)]
     fn clear(&self) -> Clear {
         (*self).clear()
+    }
+}
+
+#[cfg(feature = "table_layout")]
+impl<S: CheapCloneStr> TableContainerStyle for Style<S> {
+    #[inline(always)]
+    fn border_spacing(&self) -> Size<LengthPercentage> {
+        self.border_spacing
+    }
+}
+
+#[cfg(feature = "table_layout")]
+impl<T: TableContainerStyle> TableContainerStyle for &'_ T {
+    #[inline(always)]
+    fn border_spacing(&self) -> Size<LengthPercentage> {
+        (*self).border_spacing()
+    }
+}
+
+#[cfg(feature = "table_layout")]
+impl<S: CheapCloneStr> TableItemStyle for Style<S> {
+    #[inline(always)]
+    fn colspan(&self) -> u16 {
+        self.colspan
+    }
+
+    #[inline(always)]
+    fn is_table_row(&self) -> bool {
+        matches!(self.display, Display::TableRow)
+    }
+
+    #[inline(always)]
+    fn is_table_row_group(&self) -> bool {
+        matches!(self.display, Display::TableRowGroup)
+    }
+}
+
+#[cfg(feature = "table_layout")]
+impl<T: TableItemStyle> TableItemStyle for &'_ T {
+    #[inline(always)]
+    fn colspan(&self) -> u16 {
+        (*self).colspan()
+    }
+
+    #[inline(always)]
+    fn is_table_row(&self) -> bool {
+        (*self).is_table_row()
+    }
+
+    #[inline(always)]
+    fn is_table_row_group(&self) -> bool {
+        (*self).is_table_row_group()
     }
 }
 
@@ -1150,6 +1247,10 @@ mod tests {
             padding: Rect::zero(),
             border: Rect::zero(),
             gap: Size::zero(),
+            #[cfg(feature = "table_layout")]
+            border_spacing: Size::zero(),
+            #[cfg(feature = "table_layout")]
+            colspan: 1,
             #[cfg(feature = "block_layout")]
             text_align: Default::default(),
             #[cfg(feature = "flexbox")]
@@ -1252,12 +1353,12 @@ mod tests {
         assert_type_size::<GridTemplateComponent<String>>(56);
         assert_type_size::<GridPlacement<String>>(32);
         assert_type_size::<Line<GridPlacement<String>>>(64);
-        assert_type_size::<Style<String>>(536);
+        assert_type_size::<Style<String>>(560);
 
         // String-type dependent (Arc<str>)
         assert_type_size::<GridTemplateComponent<Arc<str>>>(56);
         assert_type_size::<GridPlacement<Arc<str>>>(24);
         assert_type_size::<Line<GridPlacement<Arc<str>>>>(48);
-        assert_type_size::<Style<Arc<str>>>(504);
+        assert_type_size::<Style<Arc<str>>>(528);
     }
 }

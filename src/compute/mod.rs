@@ -36,6 +36,9 @@ pub(crate) mod flexbox;
 #[cfg(feature = "grid")]
 pub(crate) mod grid;
 
+#[cfg(feature = "table_layout")]
+pub(crate) mod table;
+
 pub use leaf::compute_leaf_layout;
 
 #[cfg(feature = "block_layout")]
@@ -46,6 +49,9 @@ pub use self::flexbox::compute_flexbox_layout;
 
 #[cfg(feature = "grid")]
 pub use self::grid::compute_grid_layout;
+
+#[cfg(feature = "table_layout")]
+pub use self::table::compute_table_layout;
 
 #[cfg(feature = "float_layout")]
 pub use self::float::{ContentSlot, FloatContext, FloatIntrinsicWidthCalculator};

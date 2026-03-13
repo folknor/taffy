@@ -138,6 +138,8 @@ use crate::style::{GridContainerStyle, GridItemStyle};
 use crate::CheapCloneStr;
 #[cfg(feature = "block_layout")]
 use crate::{BlockContainerStyle, BlockContext, BlockItemStyle};
+#[cfg(feature = "table_layout")]
+use crate::style::{TableContainerStyle, TableItemStyle};
 
 #[cfg(all(feature = "grid", feature = "detailed_layout_info"))]
 use crate::compute::grid::DetailedGridInfo;
@@ -325,6 +327,25 @@ pub trait LayoutBlockContainer: LayoutPartialTree {
         let _ = block_ctx;
         self.compute_child_layout(node_id, inputs)
     }
+}
+
+#[cfg(feature = "table_layout")]
+/// Extends [`LayoutPartialTree`] with getters for the styles required for CSS Table layout
+pub trait LayoutTableContainer: LayoutPartialTree {
+    /// The style type representing the CSS Table container's styles
+    type TableContainerStyle<'a>: TableContainerStyle
+    where
+        Self: 'a;
+    /// The style type representing each CSS Table item's styles
+    type TableItemStyle<'a>: TableItemStyle
+    where
+        Self: 'a;
+
+    /// Get the container's styles
+    fn get_table_container_style(&self, node_id: NodeId) -> Self::TableContainerStyle<'_>;
+
+    /// Get the child's styles
+    fn get_table_child_style(&self, child_node_id: NodeId) -> Self::TableItemStyle<'_>;
 }
 
 // --- PRIVATE TRAITS

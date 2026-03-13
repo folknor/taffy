@@ -28,6 +28,8 @@ use crate::{compute::compute_block_layout, LayoutBlockContainer};
 use crate::{compute::compute_flexbox_layout, LayoutFlexboxContainer};
 #[cfg(feature = "grid")]
 use crate::{compute::compute_grid_layout, LayoutGridContainer};
+#[cfg(feature = "table_layout")]
+use crate::{compute::compute_table_layout, LayoutTableContainer};
 
 #[cfg(all(feature = "detailed_layout_info", feature = "grid"))]
 use crate::compute::grid::DetailedGridInfo;
@@ -259,6 +261,14 @@ impl<NodeContext> PrintTree for TaffyTree<NodeContext> {
             }
             #[cfg(feature = "grid")]
             (_, Display::Grid) => "GRID",
+            #[cfg(feature = "table_layout")]
+            (_, Display::Table) => "TABLE",
+            #[cfg(feature = "table_layout")]
+            (_, Display::TableRowGroup) => "TABLE-ROW-GROUP",
+            #[cfg(feature = "table_layout")]
+            (_, Display::TableRow) => "TABLE-ROW",
+            #[cfg(feature = "table_layout")]
+            (_, Display::TableCell) => "TABLE-CELL",
         }
     }
 
@@ -334,6 +344,21 @@ where
                 (Display::Flex, true) => compute_flexbox_layout(tree, node_id, inputs),
                 #[cfg(feature = "grid")]
                 (Display::Grid, true) => compute_grid_layout(tree, node_id, inputs),
+                #[cfg(feature = "table_layout")]
+                (Display::Table, true) => compute_table_layout(tree, node_id, inputs),
+                #[cfg(feature = "table_layout")]
+                (Display::TableRowGroup, true) => compute_table_layout(tree, node_id, inputs),
+                #[cfg(feature = "table_layout")]
+                (Display::TableRow, true) => {
+                    // Rows are laid out by their parent table; when measured directly,
+                    // treat as block containers so cells can compute their intrinsic sizes
+                    compute_block_layout(tree, node_id, inputs, block_ctx)
+                }
+                #[cfg(feature = "table_layout")]
+                (Display::TableCell, true) => {
+                    // Cells are block containers internally
+                    compute_block_layout(tree, node_id, inputs, block_ctx)
+                }
                 (_, false) => {
                     let node_key = node_id.into();
                     let style = &tree.taffy.nodes[node_key].style;
@@ -544,6 +569,32 @@ where
     #[cfg(feature = "detailed_layout_info")]
     fn set_detailed_grid_info(&mut self, node_id: NodeId, detailed_grid_info: DetailedGridInfo) {
         self.taffy.nodes[node_id.into()].detailed_layout_info = DetailedLayoutInfo::Grid(Box::new(detailed_grid_info));
+    }
+}
+
+#[cfg(feature = "table_layout")]
+impl<NodeContext, MeasureFunction> LayoutTableContainer for TaffyView<'_, NodeContext, MeasureFunction>
+where
+    MeasureFunction:
+        FnMut(Size<Option<f32>>, Size<AvailableSpace>, NodeId, Option<&mut NodeContext>, &Style) -> Size<f32>,
+{
+    type TableContainerStyle<'a>
+        = &'a Style
+    where
+        Self: 'a;
+    type TableItemStyle<'a>
+        = &'a Style
+    where
+        Self: 'a;
+
+    #[inline(always)]
+    fn get_table_container_style(&self, node_id: NodeId) -> Self::TableContainerStyle<'_> {
+        &self.taffy.nodes[node_id.into()].style
+    }
+
+    #[inline(always)]
+    fn get_table_child_style(&self, child_node_id: NodeId) -> Self::TableItemStyle<'_> {
+        &self.taffy.nodes[child_node_id.into()].style
     }
 }
 

@@ -39,6 +39,7 @@ default = [
     "grid",
     "block_layout",
     "float_layout",
+    "table_layout",
     "calc",
     "content_size",
     "detailed_layout_info",
@@ -55,6 +56,8 @@ float_layout = []
 flexbox = []
 ## Enables the CSS Grid layout algorithm. See [`compute_grid_layout`](crate::compute_grid_layout).
 grid = ["alloc", "dep:grid"]
+## Enables the CSS Table layout algorithm. See [`compute_table_layout`](crate::compute_table_layout).
+table_layout = []
 ## Enables calc() values for all layout algorithms
 calc = []
 ## Causes all algorithms to compute and output a content size for each node
