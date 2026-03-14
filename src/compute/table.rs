@@ -214,7 +214,9 @@ pub fn compute_table_layout(
             }
         }
 
-        // Measure intrinsic cell size
+        // Measure intrinsic cell size.
+        // measure_child_size_both with SizingMode::ContentSize returns the outer size
+        // (including padding/border), so we must NOT add cell_pb again.
         let cell_intrinsic = tree.measure_child_size_both(
             cell.node_id,
             Size::NONE,
@@ -224,7 +226,7 @@ pub fn compute_table_layout(
             Line::FALSE,
         );
 
-        let min_w = cell_intrinsic.width + cell_pb;
+        let min_w = cell_intrinsic.width;
         if min_w > columns[col].min_content_width {
             columns[col].min_content_width = min_w;
         }
@@ -238,7 +240,7 @@ pub fn compute_table_layout(
             Line::FALSE,
         );
 
-        let max_w = cell_max_intrinsic.width + cell_pb;
+        let max_w = cell_max_intrinsic.width;
         if max_w > columns[col].max_content_width {
             columns[col].max_content_width = max_w;
         }
@@ -280,12 +282,8 @@ pub fn compute_table_layout(
             Line::FALSE,
         );
 
-        let cell_core = tree.get_core_container_style(cell.node_id);
-        let cell_padding = cell_core.padding().resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
-        let cell_border_r = cell_core.border().resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
-        drop(cell_core);
-        let cell_pb = (cell_padding + cell_border_r).horizontal_axis_sum();
-        let needed = cell_intrinsic.width + cell_pb;
+        // cell_intrinsic already includes padding/border (outer size)
+        let needed = cell_intrinsic.width;
 
         if needed > spanned_width {
             let extra = needed - spanned_width;

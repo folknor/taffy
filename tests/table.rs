@@ -783,4 +783,224 @@ mod table_tests {
             auto_layout.size.width
         );
     }
+
+    #[test]
+    fn content_box_cell_padding_reflected_in_row_height() {
+        // Regression test: cell padding should be included in the row height
+        // when cells use content-box sizing.
+        //
+        // Setup: single-column table, 500px wide.
+        //   Row 0: cell with padding-bottom: 20px, contains a 28px-tall leaf
+        //   Expected row height: 28 + 20 = 48px
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let content = taffy
+            .new_leaf(Style {
+                size: Size::from_lengths(100.0, 28.0),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    box_sizing: BoxSizing::ContentBox,
+                    padding: Rect {
+                        left: LengthPercentage::length(0.0),
+                        right: LengthPercentage::length(0.0),
+                        top: LengthPercentage::length(0.0),
+                        bottom: LengthPercentage::length(20.0),
+                    },
+                    ..Default::default()
+                },
+                &[content],
+            )
+            .unwrap();
+
+        let row = taffy
+            .new_with_children(
+                Style { display: Display::TableRow, ..Default::default() },
+                &[cell],
+            )
+            .unwrap();
+
+        let table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    size: Size { width: Dimension::from_length(500.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[row],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let cell_layout = taffy.layout(cell).unwrap();
+        let row_layout = taffy.layout(row).unwrap();
+
+        // Cell height should include padding: 28 content + 20 padding-bottom = 48
+        assert_eq!(
+            cell_layout.size.height, 48.0,
+            "Cell height should be 48px (28 content + 20 padding), got {}",
+            cell_layout.size.height
+        );
+        assert_eq!(
+            row_layout.size.height, 48.0,
+            "Row height should be 48px, got {}",
+            row_layout.size.height
+        );
+    }
+
+    #[test]
+    fn auto_width_table_no_padding_double_count() {
+        // Regression test: auto-width column sizing was double-counting cell padding.
+        // measure_child_size_both with SizingMode::ContentSize returns the outer size
+        // (already including padding), but the table code was adding cell_pb on top.
+        //
+        // Setup: auto-width table, 4 cells each with padding: 0 6px and a 34px-wide child.
+        // Expected: each cell = 34 + 12 = 46px, table = 184px
+        // Bug produced: each cell = 34 + 12 + 12 = 58px, table = 232px
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let padding_6h = Rect {
+            left: LengthPercentage::length(6.0),
+            right: LengthPercentage::length(6.0),
+            top: LengthPercentage::length(0.0),
+            bottom: LengthPercentage::length(0.0),
+        };
+
+        let mut cells = Vec::new();
+        for _ in 0..4 {
+            let icon = taffy
+                .new_leaf(Style {
+                    size: Size::from_lengths(34.0, 34.0),
+                    ..Default::default()
+                })
+                .unwrap();
+            let cell = taffy
+                .new_with_children(
+                    Style {
+                        display: Display::TableCell,
+                        padding: padding_6h.clone(),
+                        ..Default::default()
+                    },
+                    &[icon],
+                )
+                .unwrap();
+            cells.push(cell);
+        }
+
+        let row = taffy
+            .new_with_children(
+                Style { display: Display::TableRow, ..Default::default() },
+                &cells,
+            )
+            .unwrap();
+
+        // Auto-width table (no explicit width)
+        let table = taffy
+            .new_with_children(
+                Style { display: Display::Table, ..Default::default() },
+                &[row],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        let cell_layout = taffy.layout(cells[0]).unwrap();
+
+        // Cell should be 34 + 6 + 6 = 46px (NOT 58px from double-counted padding)
+        assert_eq!(
+            cell_layout.size.width, 46.0,
+            "Cell width should be 46px (34 content + 12 padding), got {}",
+            cell_layout.size.width
+        );
+        // Table should be 4 * 46 = 184px
+        assert_eq!(
+            table_layout.size.width, 184.0,
+            "Table width should be 184px (4 × 46), got {}",
+            table_layout.size.width
+        );
+    }
+
+    #[test]
+    fn content_box_leaf_cell_padding_reflected_in_row_height() {
+        // Same as above but cell is a LEAF node (no children, uses measure function).
+        // This tests the compute_leaf_layout path instead of compute_block_layout.
+        use taffy::tree::NodeId;
+
+        let mut taffy: TaffyTree<&str> = TaffyTree::with_capacity(8);
+
+        let cell = taffy
+            .new_leaf_with_context(
+                Style {
+                    display: Display::TableCell,
+                    box_sizing: BoxSizing::ContentBox,
+                    padding: Rect {
+                        left: LengthPercentage::length(0.0),
+                        right: LengthPercentage::length(0.0),
+                        top: LengthPercentage::length(0.0),
+                        bottom: LengthPercentage::length(20.0),
+                    },
+                    ..Default::default()
+                },
+                "text_28px",
+            )
+            .unwrap();
+
+        let row = taffy
+            .new_with_children(
+                Style { display: Display::TableRow, ..Default::default() },
+                &[cell],
+            )
+            .unwrap();
+
+        let table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    size: Size { width: Dimension::from_length(500.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[row],
+            )
+            .unwrap();
+
+        taffy
+            .compute_layout_with_measure(
+                table,
+                Size::MAX_CONTENT,
+                |known_dimensions: Size<Option<f32>>,
+                 _available_space: Size<AvailableSpace>,
+                 _node_id: NodeId,
+                 _context: Option<&mut &str>,
+                 _style: &Style| {
+                    // Return content size of 100x28 (like one line of 20px text)
+                    Size {
+                        width: known_dimensions.width.unwrap_or(100.0),
+                        height: known_dimensions.height.unwrap_or(28.0),
+                    }
+                },
+            )
+            .unwrap();
+
+        let cell_layout = taffy.layout(cell).unwrap();
+        let row_layout = taffy.layout(row).unwrap();
+
+        // Cell height should include padding: 28 content + 20 padding-bottom = 48
+        assert_eq!(
+            cell_layout.size.height, 48.0,
+            "Leaf cell height should be 48px (28 content + 20 padding), got {}",
+            cell_layout.size.height
+        );
+        assert_eq!(
+            row_layout.size.height, 48.0,
+            "Row height should be 48px, got {}",
+            row_layout.size.height
+        );
+    }
 }
