@@ -44,7 +44,7 @@ struct ColumnInfo {
 }
 
 /// How a column's width is specified
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum ColumnWidthType {
     /// Width determined by content
     Auto,
@@ -247,7 +247,8 @@ pub fn compute_table_layout(
     };
 
     // Resolve column widths
-    resolve_column_widths(&mut columns, available_for_columns);
+    let table_has_explicit_width = styled_known_dimensions.width.is_some();
+    resolve_column_widths(&mut columns, available_for_columns, table_has_explicit_width);
 
     // Handle colspan: distribute extra width needed
     for cell in &cells {
@@ -570,8 +571,10 @@ fn collect_cells_from_row(
     }
 }
 
-/// Resolve column widths using the automatic table layout algorithm
-fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32) {
+/// Resolve column widths using the automatic table layout algorithm.
+/// When `has_explicit_width` is true, auto columns fill available space.
+/// When false (auto-width table), auto columns use their max-content width.
+fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32, has_explicit_width: bool) {
     let num_columns = columns.len();
     if num_columns == 0 {
         return;
@@ -604,7 +607,15 @@ fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32) {
 
     // Step 2: Distribute remaining space to auto columns
     if auto_count > 0 {
-        if remaining > 0.0 && available_width.is_finite() {
+        if !has_explicit_width {
+            // Auto-width table: columns use their max-content width (shrink to fit)
+            for col in columns.iter_mut() {
+                if matches!(col.width_type, ColumnWidthType::Auto) {
+                    col.resolved_width = col.max_content_width.max(col.min_content_width);
+                }
+            }
+        } else if remaining > 0.0 && available_width.is_finite() {
+            // Explicit-width table: distribute remaining space proportionally
             let total_max_content: f32 = columns
                 .iter()
                 .filter(|c| matches!(c.width_type, ColumnWidthType::Auto))
@@ -615,14 +626,14 @@ fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32) {
                 for col in columns.iter_mut() {
                     if matches!(col.width_type, ColumnWidthType::Auto) {
                         let proportion = col.max_content_width.max(1.0) / total_max_content;
-                        col.resolved_width = (remaining * proportion).max(col.min_content_width);
+                        col.resolved_width = remaining * proportion;
                     }
                 }
             } else {
                 let per_col = remaining / auto_count as f32;
                 for col in columns.iter_mut() {
                     if matches!(col.width_type, ColumnWidthType::Auto) {
-                        col.resolved_width = per_col.max(col.min_content_width);
+                        col.resolved_width = per_col;
                     }
                 }
             }

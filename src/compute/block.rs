@@ -814,14 +814,10 @@ fn perform_final_layout_on_in_flow_children(
             } else {
                 item.size
                     .map_width(|width| {
-                        // TODO: Allow stretch-sizing to be conditional, as there are exceptions.
-                        // e.g. Table children of blocks do not stretch fit
                         Some(width.unwrap_or(stretch_width).maybe_clamp(item.min_size.width, item.max_size.width))
                     })
                     .maybe_clamp(item.min_size, item.max_size)
             };
-
-            //
 
             let inputs = LayoutInput {
                 run_mode: RunMode::PerformLayout,
