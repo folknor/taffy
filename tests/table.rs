@@ -2,6 +2,7 @@
 mod table_tests {
     use taffy::prelude::*;
     use taffy::style::{Display, LengthPercentage};
+    use taffy::BoxSizing;
 
     #[test]
     fn basic_2x2_auto_widths() {
@@ -564,5 +565,105 @@ mod table_tests {
         assert_eq!(cell0_layout.size.width, 100.0, "Fixed column should be 100px");
         // The percentage column should be roughly 50% of available_for_columns
         assert!(cell1_layout.size.width > 200.0, "50% column should be > 200px, got {}", cell1_layout.size.width);
+    }
+
+    #[test]
+    fn fixed_width_columns_with_padding_and_auto_column() {
+        // Regression test: fixed-width columns with cell padding should get exactly
+        // their specified content width + padding, with the auto column absorbing
+        // the remaining space. Previously, resolved_width for Fixed columns did not
+        // include cell padding, causing a units mismatch with min/max_content_width
+        // (which DO include padding), leading to incorrect proportional distribution.
+        //
+        // Setup: 520px table, 3 columns:
+        //   col 0: auto width, 16px padding each side
+        //   col 1: 85px fixed width, 16px padding each side
+        //   col 2: 85px fixed width, 16px padding each side
+        //
+        // Expected (matching browser behavior):
+        //   col 1 & 2: 85 + 32 = 117px each
+        //   col 0: 520 - 117 - 117 = 286px
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let padding_16 = Rect {
+            left: LengthPercentage::length(16.0),
+            right: LengthPercentage::length(16.0),
+            top: LengthPercentage::length(16.0),
+            bottom: LengthPercentage::length(16.0),
+        };
+
+        // Auto-width cell with some content size (content-box to match browser default)
+        let cell_auto = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                box_sizing: BoxSizing::ContentBox,
+                size: Size { width: Dimension::AUTO, height: Dimension::from_length(30.0) },
+                padding: padding_16.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Fixed 85px cells (content-box: 85px is content width, total = 85 + 32 padding = 117px)
+        let cell_fixed1 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                box_sizing: BoxSizing::ContentBox,
+                size: Size { width: Dimension::from_length(85.0), height: Dimension::from_length(30.0) },
+                padding: padding_16.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell_fixed2 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                box_sizing: BoxSizing::ContentBox,
+                size: Size { width: Dimension::from_length(85.0), height: Dimension::from_length(30.0) },
+                padding: padding_16.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let row = taffy
+            .new_with_children(
+                Style { display: Display::TableRow, ..Default::default() },
+                &[cell_auto, cell_fixed1, cell_fixed2],
+            )
+            .unwrap();
+
+        let table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    size: Size { width: Dimension::from_length(520.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[row],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let auto_layout = taffy.layout(cell_auto).unwrap();
+        let fixed1_layout = taffy.layout(cell_fixed1).unwrap();
+        let fixed2_layout = taffy.layout(cell_fixed2).unwrap();
+
+        // Fixed columns should be exactly 85 (content) + 32 (padding) = 117px
+        assert_eq!(
+            fixed1_layout.size.width, 117.0,
+            "Fixed col 1 should be 117px (85 content + 32 padding), got {}",
+            fixed1_layout.size.width
+        );
+        assert_eq!(
+            fixed2_layout.size.width, 117.0,
+            "Fixed col 2 should be 117px (85 content + 32 padding), got {}",
+            fixed2_layout.size.width
+        );
+
+        // Auto column should get the remaining space: 520 - 117 - 117 = 286px
+        assert_eq!(
+            auto_layout.size.width, 286.0,
+            "Auto col should be 286px (520 - 117 - 117), got {}",
+            auto_layout.size.width
+        );
     }
 }

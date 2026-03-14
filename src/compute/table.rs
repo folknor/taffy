@@ -193,11 +193,19 @@ pub fn compute_table_layout(
         // Determine column width type from cell's specified width
         let width_dim = cell_size.width;
         let width_tag = width_dim.tag();
+        let cell_box_sizing = cell_core.box_sizing();
         drop(cell_core);
 
         if width_tag == CompactLength::LENGTH_TAG {
             if let ColumnWidthType::Auto = columns[col].width_type {
-                columns[col].width_type = ColumnWidthType::Fixed(width_dim.value());
+                // resolved_width represents the full column width (including cell padding/border),
+                // so for content-box cells we must add cell_pb to the CSS width value.
+                let fixed_w = if cell_box_sizing == BoxSizing::ContentBox {
+                    width_dim.value() + cell_pb
+                } else {
+                    width_dim.value()
+                };
+                columns[col].width_type = ColumnWidthType::Fixed(fixed_w);
             }
         } else if width_tag == CompactLength::PERCENT_TAG {
             if let ColumnWidthType::Auto = columns[col].width_type {
