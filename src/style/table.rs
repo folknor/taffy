@@ -48,4 +48,10 @@ pub trait TableItemStyle: CoreStyle {
     fn is_table_row_group(&self) -> bool {
         false
     }
+
+    /// Whether this item is a table cell
+    #[inline(always)]
+    fn is_table_cell(&self) -> bool {
+        false
+    }
 }

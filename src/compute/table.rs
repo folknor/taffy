@@ -6,6 +6,14 @@
 //! - Row height computation
 //! - Cell placement with colspan support
 //! - Border-spacing (cellspacing)
+//!
+//! ## Limitations
+//!
+//! - `table-layout: fixed` is partially implemented: fixed-width columns skip the
+//!   min-content-width floor, but the algorithm still scans all rows (not just the
+//!   first) for column width hints, and auto/percentage columns still use content
+//!   widths. A full CSS 2.1 §17.5.2.1 fixed-layout implementation would determine
+//!   column widths from the first row only.
 
 use crate::geometry::{Line, Point, Size};
 use crate::style::{AvailableSpace, CoreStyle, Overflow, TableContainerStyle, TableItemStyle, TableLayout};
@@ -28,6 +36,8 @@ struct TableCell {
     colspan: usize,
     /// Row index (0-based)
     row_index: usize,
+    /// Child index within the parent row (for layout order)
+    cell_index: usize,
 }
 
 /// Information about a column
@@ -138,10 +148,39 @@ pub fn compute_table_layout(
                 collect_cells_from_row(tree, row_id, row_index, &mut cells, &mut max_columns);
             }
         } else {
-            // Treat other children as anonymous rows
-            let row_index = rows.len();
-            rows.push(child_id);
-            collect_cells_from_row(tree, child_id, row_index, &mut cells, &mut max_columns);
+            // Check if the child is a direct TableCell (CSS anonymous table object case).
+            // Per CSS 2.1 §17.2.1, consecutive cells not wrapped in a row should be
+            // grouped into an anonymous table-row. We handle this by treating each
+            // direct cell as a single-cell row where the cell node doubles as the row.
+            let child_style_2 = tree.get_table_child_style(child_id);
+            let is_cell = child_style_2.is_table_cell();
+            drop(child_style_2);
+
+            if is_cell {
+                let row_index = rows.len();
+                rows.push(child_id);
+
+                let cell_style_2 = tree.get_table_child_style(child_id);
+                let colspan = cell_style_2.colspan().max(1) as usize;
+                drop(cell_style_2);
+
+                cells.push(TableCell {
+                    node_id: child_id,
+                    col_start: 0,
+                    colspan,
+                    row_index,
+                    cell_index: 0,
+                });
+
+                if colspan > max_columns {
+                    max_columns = colspan;
+                }
+            } else {
+                // Non-cell, non-row, non-row-group child — treat as anonymous row
+                let row_index = rows.len();
+                rows.push(child_id);
+                collect_cells_from_row(tree, child_id, row_index, &mut cells, &mut max_columns);
+            }
         }
     }
 
@@ -431,7 +470,7 @@ pub fn compute_table_layout(
             tree.set_unrounded_layout(
                 cell.node_id,
                 &Layout {
-                    order: 0,
+                    order: cell.cell_index as u32,
                     location: Point {
                         x: col_x_offsets[cell.col_start] - padding_border.left,
                         y: 0.0,
@@ -569,6 +608,7 @@ fn collect_cells_from_row(
             col_start: col,
             colspan,
             row_index,
+            cell_index: cell_idx,
         });
 
         col += colspan;

@@ -880,6 +880,11 @@ impl<S: CheapCloneStr> TableItemStyle for Style<S> {
     fn is_table_row_group(&self) -> bool {
         matches!(self.display, Display::TableRowGroup)
     }
+
+    #[inline(always)]
+    fn is_table_cell(&self) -> bool {
+        matches!(self.display, Display::TableCell)
+    }
 }
 
 #[cfg(feature = "table_layout")]
@@ -897,6 +902,11 @@ impl<T: TableItemStyle> TableItemStyle for &'_ T {
     #[inline(always)]
     fn is_table_row_group(&self) -> bool {
         (*self).is_table_row_group()
+    }
+
+    #[inline(always)]
+    fn is_table_cell(&self) -> bool {
+        (*self).is_table_cell()
     }
 }
 

@@ -785,6 +785,60 @@ mod table_tests {
     }
 
     #[test]
+    fn direct_table_cell_children_not_discarded() {
+        // Regression test: direct TableCell children of a table (no wrapping TableRow)
+        // should be treated as cells in an anonymous row, not discarded.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let cell0 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell1 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Cells are direct children of the table (no TableRow wrapper)
+        let table = taffy
+            .new_with_children(
+                Style { display: Display::Table, ..Default::default() },
+                &[cell0, cell1],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        let cell0_layout = taffy.layout(cell0).unwrap();
+        let cell1_layout = taffy.layout(cell1).unwrap();
+
+        // Table should not be empty — cells should contribute to size
+        assert!(
+            table_layout.size.width > 0.0,
+            "Table should not be empty, got width {}",
+            table_layout.size.width
+        );
+        assert!(
+            table_layout.size.height >= 30.0,
+            "Table height should be >= 30px, got {}",
+            table_layout.size.height
+        );
+
+        // Both cells should have been laid out with non-zero size
+        assert_eq!(cell0_layout.size.width, 100.0, "Cell 0 width");
+        assert_eq!(cell0_layout.size.height, 30.0, "Cell 0 height");
+        assert_eq!(cell1_layout.size.width, 100.0, "Cell 1 width");
+        assert_eq!(cell1_layout.size.height, 30.0, "Cell 1 height");
+    }
+
+    #[test]
     fn content_box_cell_padding_reflected_in_row_height() {
         // Regression test: cell padding should be included in the row height
         // when cells use content-box sizing.
