@@ -1,7 +1,7 @@
 #[cfg(feature = "table_layout")]
 mod table_tests {
     use taffy::prelude::*;
-    use taffy::style::{Display, LengthPercentage};
+    use taffy::style::{Display, LengthPercentage, TableLayout};
     use taffy::BoxSizing;
 
     #[test]
@@ -663,6 +663,123 @@ mod table_tests {
         assert_eq!(
             auto_layout.size.width, 286.0,
             "Auto col should be 286px (520 - 117 - 117), got {}",
+            auto_layout.size.width
+        );
+    }
+
+    #[test]
+    fn table_layout_fixed_ignores_min_content_width() {
+        // With table-layout: fixed, fixed-width columns should use their specified
+        // width exactly, even when min_content_width is larger. Content overflows
+        // rather than expanding the column.
+        //
+        // Setup: 520px table with table-layout: fixed, 3 columns:
+        //   col 0: auto width, 16px padding each side
+        //   col 1: 85px content-box width, 16px padding each side (total = 117px)
+        //   col 2: 85px content-box width, 16px padding each side (total = 117px)
+        //
+        // The fixed columns contain wide content (150px leaf) that exceeds 85px,
+        // but with table-layout: fixed the column stays at 117px.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let padding_16 = Rect {
+            left: LengthPercentage::length(16.0),
+            right: LengthPercentage::length(16.0),
+            top: LengthPercentage::length(16.0),
+            bottom: LengthPercentage::length(16.0),
+        };
+
+        // Auto-width cell
+        let cell_auto = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                box_sizing: BoxSizing::ContentBox,
+                size: Size { width: Dimension::AUTO, height: Dimension::from_length(30.0) },
+                padding: padding_16.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Fixed 85px cells with wide content (150px leaf child)
+        let wide_content1 = taffy
+            .new_leaf(Style {
+                size: Size::from_lengths(150.0, 14.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell_fixed1 = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    box_sizing: BoxSizing::ContentBox,
+                    size: Size { width: Dimension::from_length(85.0), height: Dimension::from_length(30.0) },
+                    padding: padding_16.clone(),
+                    ..Default::default()
+                },
+                &[wide_content1],
+            )
+            .unwrap();
+
+        let wide_content2 = taffy
+            .new_leaf(Style {
+                size: Size::from_lengths(150.0, 14.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell_fixed2 = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    box_sizing: BoxSizing::ContentBox,
+                    size: Size { width: Dimension::from_length(85.0), height: Dimension::from_length(30.0) },
+                    padding: padding_16.clone(),
+                    ..Default::default()
+                },
+                &[wide_content2],
+            )
+            .unwrap();
+
+        let row = taffy
+            .new_with_children(
+                Style { display: Display::TableRow, ..Default::default() },
+                &[cell_auto, cell_fixed1, cell_fixed2],
+            )
+            .unwrap();
+
+        let table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    table_layout: TableLayout::Fixed,
+                    size: Size { width: Dimension::from_length(520.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[row],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let auto_layout = taffy.layout(cell_auto).unwrap();
+        let fixed1_layout = taffy.layout(cell_fixed1).unwrap();
+        let fixed2_layout = taffy.layout(cell_fixed2).unwrap();
+
+        // Fixed columns should be exactly 117px (85 + 32 padding), NOT expanded by content
+        assert_eq!(
+            fixed1_layout.size.width, 117.0,
+            "Fixed col 1 should be 117px regardless of content width, got {}",
+            fixed1_layout.size.width
+        );
+        assert_eq!(
+            fixed2_layout.size.width, 117.0,
+            "Fixed col 2 should be 117px regardless of content width, got {}",
+            fixed2_layout.size.width
+        );
+
+        // Auto column gets remaining: 520 - 117 - 117 = 286px
+        assert_eq!(
+            auto_layout.size.width, 286.0,
+            "Auto col should be 286px, got {}",
             auto_layout.size.width
         );
     }

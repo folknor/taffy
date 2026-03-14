@@ -8,7 +8,7 @@
 //! - Border-spacing (cellspacing)
 
 use crate::geometry::{Line, Point, Size};
-use crate::style::{AvailableSpace, CoreStyle, Overflow, TableContainerStyle, TableItemStyle};
+use crate::style::{AvailableSpace, CoreStyle, Overflow, TableContainerStyle, TableItemStyle, TableLayout};
 use crate::style::CompactLength;
 use crate::tree::{Layout, LayoutInput, LayoutOutput, NodeId, RunMode, SizingMode};
 use crate::tree::traits::LayoutTableContainer;
@@ -78,6 +78,7 @@ pub fn compute_table_layout(
     let box_sizing = style.box_sizing();
     let aspect_ratio = style.aspect_ratio();
     let border_spacing = style.border_spacing();
+    let table_layout = style.table_layout();
     drop(style);
 
     let parent_width = parent_size.width;
@@ -256,7 +257,8 @@ pub fn compute_table_layout(
 
     // Resolve column widths
     let table_has_explicit_width = styled_known_dimensions.width.is_some();
-    resolve_column_widths(&mut columns, available_for_columns, table_has_explicit_width);
+    let is_fixed_layout = table_layout == TableLayout::Fixed;
+    resolve_column_widths(&mut columns, available_for_columns, table_has_explicit_width, is_fixed_layout);
 
     // Handle colspan: distribute extra width needed
     for cell in &cells {
@@ -582,7 +584,9 @@ fn collect_cells_from_row(
 /// Resolve column widths using the automatic table layout algorithm.
 /// When `has_explicit_width` is true, auto columns fill available space.
 /// When false (auto-width table), auto columns use their max-content width.
-fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32, has_explicit_width: bool) {
+/// When `is_fixed_layout` is true (table-layout: fixed), fixed-width columns use their
+/// specified width exactly without the min_content_width floor.
+fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32, has_explicit_width: bool, is_fixed_layout: bool) {
     let num_columns = columns.len();
     if num_columns == 0 {
         return;
@@ -595,7 +599,9 @@ fn resolve_column_widths(columns: &mut [ColumnInfo], available_width: f32, has_e
     for col in columns.iter_mut() {
         match col.width_type {
             ColumnWidthType::Fixed(w) => {
-                col.resolved_width = w.max(col.min_content_width);
+                // With table-layout: fixed, use specified width exactly (content may overflow/clip).
+                // With table-layout: auto, ensure column is at least as wide as min content.
+                col.resolved_width = if is_fixed_layout { w } else { w.max(col.min_content_width) };
                 remaining -= col.resolved_width;
             }
             ColumnWidthType::Percent(pct) => {

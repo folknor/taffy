@@ -34,7 +34,7 @@ pub use self::grid::{
     MinTrackSizingFunction, RepetitionCount, TrackSizingFunction,
 };
 #[cfg(feature = "table_layout")]
-pub use self::table::{TableContainerStyle, TableItemStyle};
+pub use self::table::{TableContainerStyle, TableItemStyle, TableLayout};
 #[cfg(feature = "grid")]
 pub(crate) use self::grid::{GridAreaAxis, GridAreaEnd};
 #[cfg(feature = "grid")]
@@ -480,6 +480,9 @@ pub struct Style<S: CheapCloneStr = DefaultCheapStr> {
     #[cfg(feature = "table_layout")]
     #[cfg_attr(feature = "serde", serde(default = "style_helpers::zero"))]
     pub border_spacing: Size<LengthPercentage>,
+    /// The table layout algorithm (CSS `table-layout` property)
+    #[cfg(feature = "table_layout")]
+    pub table_layout: TableLayout,
     /// The number of columns this cell spans (colspan attribute)
     #[cfg(feature = "table_layout")]
     pub colspan: u16,
@@ -590,6 +593,8 @@ impl<S: CheapCloneStr> Style<S> {
         // Table
         #[cfg(feature = "table_layout")]
         border_spacing: Size::zero(),
+        #[cfg(feature = "table_layout")]
+        table_layout: TableLayout::Auto,
         #[cfg(feature = "table_layout")]
         colspan: 1,
         // Block
@@ -839,6 +844,11 @@ impl<S: CheapCloneStr> TableContainerStyle for Style<S> {
     fn border_spacing(&self) -> Size<LengthPercentage> {
         self.border_spacing
     }
+
+    #[inline(always)]
+    fn table_layout(&self) -> TableLayout {
+        self.table_layout
+    }
 }
 
 #[cfg(feature = "table_layout")]
@@ -846,6 +856,11 @@ impl<T: TableContainerStyle> TableContainerStyle for &'_ T {
     #[inline(always)]
     fn border_spacing(&self) -> Size<LengthPercentage> {
         (*self).border_spacing()
+    }
+
+    #[inline(always)]
+    fn table_layout(&self) -> TableLayout {
+        (*self).table_layout()
     }
 }
 
@@ -1249,6 +1264,8 @@ mod tests {
             gap: Size::zero(),
             #[cfg(feature = "table_layout")]
             border_spacing: Size::zero(),
+            #[cfg(feature = "table_layout")]
+            table_layout: Default::default(),
             #[cfg(feature = "table_layout")]
             colspan: 1,
             #[cfg(feature = "block_layout")]
