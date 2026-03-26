@@ -277,6 +277,10 @@ fn build_style<S: CheapCloneStr>(xnode: roxmltree::Node) -> taffy::Style<S> {
             height: parse_or(xnode.attribute("row-gap"), LengthPercentage::ZERO),
         },
 
+        border_spacing: Size::zero(),
+        table_layout: Default::default(),
+        colspan: 1,
+
         aspect_ratio: maybe_parse(xnode.attribute("aspect-ratio")),
         align_items: maybe_parse(xnode.attribute("align-items")),
         align_self: maybe_parse(xnode.attribute("align-self")),
