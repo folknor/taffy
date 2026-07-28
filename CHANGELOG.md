@@ -1,5 +1,99 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Flexbox: min/max sizes transferred through the aspect ratio now clamp the flex base size, the automatic minimum size, and the hypothetical main/cross sizes of flex items, instead of being baked into the item's used min/max sizes. This matches browser behaviour for replaced elements and items with `aspect-ratio` combined with min/max constraints in the opposite axis ([w3c/csswg-drafts#10997](https://github.com/w3c/csswg-drafts/issues/10997))
+
+- Numeric style helpers (`length`, `percent`, `fr`, `flex`) now accept `Input: Into<f64>` instead of `Input: Into<f32>`. This allows bare float literals such as `length(800.0)` to be used without triggering the `float_literal_f32_fallback` future-compatibility lint, while widening the set of accepted numeric input types (#974)
+
+## 0.12.2
+
+### Fixed
+
+- Block: return margin-collapsing outputs from vertical axis ComputeSize calls (#976)
+
+## 0.12.1
+
+This release container a couple of critical fixes for layout/caching bugs in the 0.12.0 release.
+
+### Fixed
+
+- Block: don't commit deferred in-flow layouts to the tree when only computing size (#971)
+- Block: pass through the requested `run_mode` when performing final layout on in-flow children, instead of always using `MeasureSize` (#972)
+
+## 0.12.0
+
+The MSRV for this release is 1.71.
+
+### Block: support for `align-content` (#959)
+
+Block containers now implement `align_content` along the block axis for their in-flow children.
+
+### More correct caching logic
+
+- The cache key now includes the axis, parent size, and available space, and ignores available space in an axis when a known dimension is set there. This is a performance hit (~10% in common cases, ~60% in pathalogically ones) but is necessary for correctness. It does also enable early-return optimizations (in cases where only the horizontal size is needed, which can allow that performance to be recouped in some cases (#911)
+
+### Fixed
+
+- Flexbox: fall back to safe `align-self` of `start` on absolute-position overflow (#958)
+- Block: derive definite height from `aspect-ratio` at final layout. A block container with `aspect-ratio` and an automatic height now becomes definite when its width is filled/stretched, so children's percentage heights resolve correctly and the ratio is preserved (#965)
+
+## 0.11.0
+
+The MSRV for this release is 1.71.
+
+### Implemented safe alignment keywords (#952)
+
+Taffy now implements [safe alignment](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/align-items#safe) (in addition to unsafe alignment).
+
+The alignment style types are now structs consisting of an `AlignmentKeyword` and an `AlignmentSafety` modifier. For most users this will mean changing from using enum variants like `AlignContent::Start` to associated constants like `AlignContent::START`.
+
+This change applies to the `AlignContent`, `JustifyContent`, `AlignItems`, `JustifyItems`, `AlignSelf`, and `JustifySelf` types.
+
+### Fixed
+
+- Grid: resolve item percentages against grid area rather than grid container (#960)
+
+## 0.10.1
+
+### Fixed
+
+- CSS Grid auto-repeat and minimum-size handling (#946)
+
+## 0.10.0
+
+The MSRV for this release is 1.71.
+
+### Support for `direction`
+
+The `direction` property is now supported, allowing for RTL layout of boxes in Block, Flexbox, and CSS Grid layout modes.
+
+### Support for floats
+
+The `float` and `clear` properties are now supported. Support consists of a general-purpose `FloatContext` in the `compute` module, and integration of float layout into Block layout. Block layout now also has a `BlockContext` that allows a `FloatContext` to be shared across an entire Block formatting context.
+
+Float support is feature flagged by the `float_layout` feature.
+
+### Support for parsing styles from CSS string (#929)
+
+All of Taffy's style types (except the top-level `Style` struct) now have `FromStr` implementations that parses the type from the CSS representation of that value (e.g. `30px` or `50%` for `LengthPercentage`. A future version of Taffy will likely add support for parsing `Style` from `;`-seperated CSS.
+
+CSS parsing is feature flagged by the `parse` feature.
+
+Additionally the `parse_faster` feature enables optimizations for faster parsing at the cost of pulling in proc-macro dependencies such as `syn`.
+
+### Changed
+
+- Make DetailedGridTracksInfo accessible from a public module (#899)
+- Add `TaffyTree::write_tree` method to debug print the tree into an arbitrary writer (#925)
+- The cache `set` and `set` APIs now take `&LayoutInput` rather than individual values (#933)
+
+### Fixed
+
+- Flexbox: apply gap even when there are auto margins (#938)
+
 ## 0.9.3
 
 ### Added
@@ -25,6 +119,8 @@
 - Flexbox: don't apply cross-axis stretch alignment to children with auto margins (#861)
 
 ## 0.9.0
+
+The MSRV for this release is 1.65.
 
 ### Support for named grid lines and grid areas
 
