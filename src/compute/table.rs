@@ -31,6 +31,8 @@
 //!   algorithm still scans all rows (not just the first) for column width hints. A
 //!   full CSS 2.1 §17.5.2.1 fixed-layout implementation would determine column
 //!   widths from the first row only.
+//! - `height` on a cell is honoured as a row minimum (CSS 2.1 §17.5.3), but
+//!   `height` on a row or row group is ignored: only cells raise row heights
 //! - `rowspan="0"` (span to end of section) is treated as 1
 //! - Children of row groups are assumed to be rows (no anonymous box fix-up inside
 //!   row groups)
@@ -630,26 +632,66 @@ pub fn compute_table_layout(
     #[cfg(feature = "content_size")]
     let mut cell_overflows: Vec<Point<Overflow>> = Vec::with_capacity(cells.len());
 
+    let cell_percentage_basis = Size { width: Some(table_width), height: parent_size.height };
+
     for (cell_idx, cell) in cells.iter().enumerate() {
         let cell_width = cell_widths[cell_idx];
+
+        // A cell's specified height is a *minimum* for its row, not a cap (CSS 2.1
+        // §17.5.3): content taller than it grows the row. So the cell is measured
+        // with SizingMode::ContentSize, which makes it disregard its own size styles,
+        // and its specified height is applied afterwards as a floor.
+        //
+        // (Measuring it both ways instead is not an option: the measure cache keys
+        // entries on known dimensions and available space alone, so the two calls
+        // would share one cache entry.)
         let measured = tree.compute_child_layout(
             cell.node_id,
             LayoutInput {
                 run_mode: RunMode::ComputeSize,
-                sizing_mode: SizingMode::InherentSize,
+                sizing_mode: SizingMode::ContentSize,
                 axis: RequestedAxis::Both,
                 known_dimensions: Size { width: Some(cell_width), height: None },
-                parent_size: Size { width: Some(table_width), height: parent_size.height },
+                parent_size: cell_percentage_basis,
                 available_space: Size { width: AvailableSpace::Definite(cell_width), height: AvailableSpace::MaxContent },
                 vertical_margins_are_collapsible: Line::FALSE,
             },
         );
 
-        cell_measured_heights.push(measured.size.height);
+        let cell_core = tree.get_core_container_style(cell.node_id);
+        let cell_box_sizing_adjustment = if cell_core.box_sizing() == BoxSizing::ContentBox {
+            (cell_core.padding().resolve_or_zero(Some(table_width), |v, b| tree.calc(v, b))
+                + cell_core.border().resolve_or_zero(Some(table_width), |v, b| tree.calc(v, b)))
+            .sum_axes()
+        } else {
+            Size::ZERO
+        };
+        let cell_min_size = cell_core
+            .min_size()
+            .maybe_resolve(cell_percentage_basis, |v, b| tree.calc(v, b))
+            .maybe_add(cell_box_sizing_adjustment);
+        let cell_max_size = cell_core
+            .max_size()
+            .maybe_resolve(cell_percentage_basis, |v, b| tree.calc(v, b))
+            .maybe_add(cell_box_sizing_adjustment);
+        let cell_specified_height = cell_core
+            .size()
+            .maybe_resolve(cell_percentage_basis, |v, b| tree.calc(v, b))
+            .maybe_add(cell_box_sizing_adjustment)
+            .maybe_clamp(cell_min_size, cell_max_size)
+            .height;
+        drop(cell_core);
+
+        // ContentSize sizing does not apply the min height to leaf cells, so the
+        // floor covers it as well as the specified height
+        let height_floor = f32_max(cell_specified_height.unwrap_or(0.0), cell_min_size.height.unwrap_or(0.0));
+        let cell_height = f32_max(measured.size.height, height_floor);
+
+        cell_measured_heights.push(cell_height);
 
         // Single-row cells establish the initial row heights
-        if cell.rowspan == 1 && measured.size.height > row_heights[cell.row_start] {
-            row_heights[cell.row_start] = measured.size.height;
+        if cell.rowspan == 1 && cell_height > row_heights[cell.row_start] {
+            row_heights[cell.row_start] = cell_height;
         }
 
         // The table's baseline is the baseline of its first row (max cell baseline)

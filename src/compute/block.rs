@@ -714,7 +714,12 @@ fn determine_content_based_container_width(
     #[cfg(feature = "float_layout")]
     let mut float_contribution = FloatIntrinsicWidthCalculator::new(available_width);
     for item in items.iter().filter(|item| item.position != Position::Absolute) {
-        let known_dimensions = item.size.maybe_clamp(item.min_size, item.max_size);
+        // A table's used width is `max(specified width, min-content width)`
+        // (CSS 2.1 §17.5.2.2), so a specified width is not necessarily what the table
+        // contributes to our intrinsic width: it has to be measured. As in the final
+        // layout pass below, tables are left to resolve their own size styles.
+        let known_dimensions =
+            if item.is_table { Size::NONE } else { item.size.maybe_clamp(item.min_size, item.max_size) };
 
         let item_x_margin_sum = item
             .margin

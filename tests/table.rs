@@ -1575,4 +1575,135 @@ mod table_tests {
         assert_eq!(taffy.layout(colgroup).unwrap().size.width, 0.0);
         assert_eq!(taffy.layout(col0).unwrap().size.width, 0.0);
     }
+
+    #[test]
+    fn specified_cell_height_is_a_minimum_not_a_cap() {
+        // <td style="width:30px;height:30px"><img width=60 height=60></td>
+        // CSS 2.1 §17.5.3: height on a cell is a minimum for the row, so the 60px
+        // image grows the row rather than overflowing a 30px cell.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let img = taffy.new_leaf(Style { size: Size::from_lengths(60.0, 60.0), ..Default::default() }).unwrap();
+        let cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    size: Size::from_lengths(30.0, 30.0),
+                    ..Default::default()
+                },
+                &[img],
+            )
+            .unwrap();
+        let row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell])
+            .unwrap();
+        let table = taffy
+            .new_with_children(Style { display: Display::Table, ..Default::default() }, &[row])
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        assert_eq!(taffy.layout(cell).unwrap().size, Size { width: 60.0, height: 60.0 }, "Cell grows to its content");
+        assert_eq!(taffy.layout(row).unwrap().size.height, 60.0, "Row height is the cell's content height");
+        assert_eq!(taffy.layout(table).unwrap().size, Size { width: 60.0, height: 60.0 });
+        // The image no longer overflows the cell
+        assert_eq!(taffy.layout(img).unwrap().location.y, 0.0);
+    }
+
+    #[test]
+    fn cell_taller_than_specified_height_still_honours_it_as_a_floor() {
+        // A cell whose content is shorter than its specified height keeps that height
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let content = taffy.new_leaf(Style { size: Size::from_lengths(20.0, 10.0), ..Default::default() }).unwrap();
+        let cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    size: Size::from_lengths(40.0, 50.0),
+                    ..Default::default()
+                },
+                &[content],
+            )
+            .unwrap();
+        let row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell])
+            .unwrap();
+        let table = taffy
+            .new_with_children(Style { display: Display::Table, ..Default::default() }, &[row])
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        assert_eq!(taffy.layout(cell).unwrap().size, Size { width: 40.0, height: 50.0 });
+    }
+
+    #[test]
+    fn nested_table_min_content_width_reaches_outer_cell() {
+        // MJML social-icon footer:
+        //   <td style="padding:4px 10px"><table style="width:30px"><tr>
+        //     <td style="width:30px;height:30px"><img width=60 height=60></td>
+        //   </tr></table></td>
+        // The inner table's used width is max(30px, min-content 60px) = 60px, and it
+        // is that used width — not the specified 30px — which the outer cell sizes
+        // itself from (CSS 2.1 §17.5.2.2).
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+
+        let img = taffy.new_leaf(Style { size: Size::from_lengths(60.0, 60.0), ..Default::default() }).unwrap();
+        let inner_cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    size: Size::from_lengths(30.0, 30.0),
+                    ..Default::default()
+                },
+                &[img],
+            )
+            .unwrap();
+        let inner_row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[inner_cell])
+            .unwrap();
+        let inner_table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    size: Size { width: Dimension::from_length(30.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[inner_row],
+            )
+            .unwrap();
+
+        let outer_cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    padding: Rect {
+                        left: LengthPercentage::from_length(10.0),
+                        right: LengthPercentage::from_length(10.0),
+                        top: LengthPercentage::from_length(4.0),
+                        bottom: LengthPercentage::from_length(4.0),
+                    },
+                    ..Default::default()
+                },
+                &[inner_table],
+            )
+            .unwrap();
+        let outer_row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[outer_cell])
+            .unwrap();
+        let outer_table = taffy
+            .new_with_children(Style { display: Display::Table, ..Default::default() }, &[outer_row])
+            .unwrap();
+
+        taffy.compute_layout(outer_table, Size::MAX_CONTENT).unwrap();
+
+        assert_eq!(taffy.layout(inner_table).unwrap().size, Size { width: 60.0, height: 60.0 });
+        assert_eq!(
+            taffy.layout(outer_cell).unwrap().size,
+            Size { width: 80.0, height: 68.0 },
+            "Outer cell wraps the inner table's 60x60 used size plus its 10/4 padding"
+        );
+        assert_eq!(taffy.layout(outer_table).unwrap().size, Size { width: 80.0, height: 68.0 });
+    }
 }
