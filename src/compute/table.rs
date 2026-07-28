@@ -3,20 +3,27 @@
 //! Implements the automatic table layout algorithm with support for:
 //! - Column count determination
 //! - Column width resolution (auto, fixed px, percentage) with min/max-content sizing
+//! - `<col>`/`<colgroup>` column width hints
 //! - Row height computation
-//! - Cell placement with colspan support
-//! - Border-spacing (cellspacing)
+//! - Cell placement with colspan and rowspan support
+//! - Border-spacing (cellspacing) and `border-collapse` (approximated, see below)
+//! - Captions (`caption-side: top | bottom`)
 //! - Anonymous rows/cells for mis-parented children (CSS 2.1 §17.2.1)
 //! - First-row baselines
+//! - Vertical alignment within cells: cells are block containers laid out at the
+//!   full row height, so setting `align_content` on a cell gives the equivalent of
+//!   `vertical-align: top | middle | bottom` (map HTML `valign` to it)
 //!
 //! ## Limitations
 //!
-//! - No rowspan support
-//! - No captions
-//! - No `<col>`/`<colgroup>` width support
-//! - No `border-collapse` support
-//! - No `vertical-align` support in cells: cell boxes stretch to the row height and
-//!   their content is top-anchored (CSS default is baseline alignment)
+//! - No true `vertical-align: baseline` for cell content (cells don't shift to
+//!   align their baselines with the row baseline; use `align_content` as above)
+//! - `border-collapse: collapse` only suppresses border-spacing; adjacent cell
+//!   borders are not merged or overlapped (taffy does not model border styles,
+//!   which border conflict resolution requires)
+//! - Captions do not influence the table's width (CSS says the wrapper is at least
+//!   as wide as the caption's min-content width); caption-only tables (no cells)
+//!   render as empty
 //! - Percentage columns are resolved against the table's used content width but do
 //!   not influence the table's own width determination
 //! - `table-layout: fixed` is partially implemented: fixed-width and percentage
@@ -24,6 +31,7 @@
 //!   algorithm still scans all rows (not just the first) for column width hints. A
 //!   full CSS 2.1 §17.5.2.1 fixed-layout implementation would determine column
 //!   widths from the first row only.
+//! - `rowspan="0"` (span to end of section) is treated as 1
 //! - Children of row groups are assumed to be rows (no anonymous box fix-up inside
 //!   row groups)
 
@@ -31,7 +39,8 @@
 use crate::compute::common::content_size::compute_content_size_contribution;
 use crate::geometry::{Line, Point, Size};
 use crate::style::{
-    AvailableSpace, CompactLength, CoreStyle, Overflow, TableContainerStyle, TableItemStyle, TableLayout,
+    AvailableSpace, BorderCollapse, CaptionSide, CompactLength, CoreStyle, Overflow, TableContainerStyle,
+    TableItemStyle, TableLayout,
 };
 use crate::tree::traits::{LayoutPartialTreeExt, LayoutTableContainer};
 use crate::tree::{Layout, LayoutInput, LayoutOutput, NodeId, RequestedAxis, RunMode, SizingMode};
@@ -48,7 +57,21 @@ struct TableRowEntry {
     order: u32,
 }
 
-/// A resolved cell in the table
+/// A cell recorded during structure gathering, before grid placement
+struct PendingCell {
+    /// The node id of the cell
+    node_id: NodeId,
+    /// Number of columns spanned
+    colspan: usize,
+    /// Number of rows spanned
+    rowspan: usize,
+    /// Child index within the cell's parent (used as the layout `order`)
+    order: u32,
+    /// Whether the cell's parent node is the table itself (anonymous row member)
+    parent_is_table: bool,
+}
+
+/// A resolved cell in the table grid
 struct TableCell {
     /// The node id of the cell
     node_id: NodeId,
@@ -56,8 +79,10 @@ struct TableCell {
     col_start: usize,
     /// Number of columns spanned
     colspan: usize,
-    /// Row index (0-based)
-    row_index: usize,
+    /// Starting row index (0-based)
+    row_start: usize,
+    /// Number of rows spanned (clamped to the available rows)
+    rowspan: usize,
     /// Child index within the cell's parent (used as the layout `order`)
     order: u32,
     /// Whether the cell's parent node is the table itself (anonymous row member).
@@ -65,12 +90,28 @@ struct TableCell {
     parent_is_table: bool,
 }
 
+/// A caption of the table
+struct TableCaption {
+    /// The node id of the caption
+    node_id: NodeId,
+    /// Child index within the table (used as the layout `order`)
+    order: u32,
+    /// Which side of the table grid the caption goes on
+    side: CaptionSide,
+    /// Measured height of the caption box (filled in after the table width is known)
+    height: f32,
+    /// Resolved vertical margins of the caption
+    margin_top: f32,
+    /// Resolved bottom margin of the caption
+    margin_bottom: f32,
+}
+
 /// Information about a column
 #[derive(Clone)]
 struct ColumnInfo {
-    /// Largest fixed (px) width specified by any cell in this column (outer width)
+    /// Largest fixed (px) width specified by any cell or `<col>` in this column (outer width)
     fixed: Option<f32>,
-    /// Largest percentage width specified by any cell in this column (as a fraction)
+    /// Largest percentage width specified by any cell or `<col>` in this column (as a fraction)
     percent: Option<f32>,
     /// Minimum content width
     min_content_width: f32,
@@ -81,9 +122,24 @@ struct ColumnInfo {
 }
 
 impl ColumnInfo {
-    /// Whether no cell in this column specified a width
+    /// Whether no cell or `<col>` in this column specified a width
     fn is_auto(&self) -> bool {
         self.fixed.is_none() && self.percent.is_none()
+    }
+
+    /// Merge a specified width (from a cell or a `<col>` element) into this column
+    fn apply_specified_width(&mut self, width_tag: usize, value: f32) {
+        if width_tag == CompactLength::LENGTH_TAG {
+            self.fixed = Some(match self.fixed {
+                Some(current) => f32_max(current, value),
+                None => value,
+            });
+        } else if width_tag == CompactLength::PERCENT_TAG {
+            self.percent = Some(match self.percent {
+                Some(current) => f32_max(current, value),
+                None => value,
+            });
+        }
     }
 }
 
@@ -141,6 +197,7 @@ pub fn compute_table_layout(
     let aspect_ratio = style.aspect_ratio();
     let border_spacing = style.border_spacing();
     let is_fixed_layout = style.table_layout() == TableLayout::Fixed;
+    let is_collapsed = style.border_collapse() == BorderCollapse::Collapse;
     drop(style);
 
     let parent_width = parent_size.width;
@@ -168,46 +225,94 @@ pub fn compute_table_layout(
 
     let styled_known_dimensions = known_dimensions.or(specified_size);
 
-    // Resolve border-spacing
-    let h_spacing = border_spacing.width.resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
-    let v_spacing = border_spacing.height.resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
+    // Resolve border-spacing. In the collapsed border model spacing does not apply.
+    let (h_spacing, v_spacing) = if is_collapsed {
+        (0.0, 0.0)
+    } else {
+        (
+            border_spacing.width.resolve_or_zero(parent_width, |v, b| tree.calc(v, b)),
+            border_spacing.height.resolve_or_zero(parent_width, |v, b| tree.calc(v, b)),
+        )
+    };
 
-    // Phase 1: Gather table structure (rows, cells)
+    // Phase 1: Gather table structure (rows, cells, captions, column hints)
     //
-    // Direct children that are neither rows nor row groups become cells in an
-    // anonymous row per CSS 2.1 §17.2.1: consecutive such children share one
-    // anonymous row, and non-cell children are treated as anonymous cells.
+    // Direct children that are neither rows, row groups, captions nor columns become
+    // cells in an anonymous row per CSS 2.1 §17.2.1: consecutive such children share
+    // one anonymous row, and non-cell children are treated as anonymous cells.
     let child_count = tree.child_count(node_id);
     let mut rows: Vec<TableRowEntry> = Vec::new();
-    let mut cells: Vec<TableCell> = Vec::new();
-    let mut max_columns: usize = 0;
-    // Index into `rows` of the anonymous row currently being accumulated, plus the
-    // next free column within it. Reset whenever a real row or row group appears.
+    let mut row_pending: Vec<Vec<PendingCell>> = Vec::new();
+    let mut captions: Vec<TableCaption> = Vec::new();
+    // (starting column, span, width tag, width value) from <col>/<colgroup> elements
+    let mut column_hints: Vec<(usize, usize, usize, f32)> = Vec::new();
+    let mut next_hint_col: usize = 0;
+    // Index into `rows` of the anonymous row currently being accumulated.
+    // Reset whenever a real row or row group appears.
     let mut open_anonymous_row: Option<usize> = None;
-    let mut anonymous_col: usize = 0;
 
     for child_idx in 0..child_count {
         let child_id = tree.get_child_id(node_id, child_idx);
         let child_style = tree.get_table_child_style(child_id);
         let is_row = child_style.is_table_row();
         let is_row_group = child_style.is_table_row_group();
+        let is_caption = child_style.is_table_caption();
+        let is_column = child_style.is_table_column();
+        let is_column_group = child_style.is_table_column_group();
+        let caption_side = child_style.caption_side();
         let colspan = if child_style.is_table_cell() { child_style.colspan().max(1) as usize } else { 1 };
+        let rowspan = if child_style.is_table_cell() { child_style.rowspan().max(1) as usize } else { 1 };
         drop(child_style);
 
         if is_row {
             open_anonymous_row = None;
-            let row_index = rows.len();
             rows.push(TableRowEntry { node: Some(child_id), order: child_idx as u32 });
-            collect_cells_from_row(tree, child_id, row_index, &mut cells, &mut max_columns);
+            row_pending.push(collect_pending_cells(tree, child_id));
         } else if is_row_group {
             open_anonymous_row = None;
             // Row groups contain rows
             let group_child_count = tree.child_count(child_id);
             for group_child_idx in 0..group_child_count {
                 let row_id = tree.get_child_id(child_id, group_child_idx);
-                let row_index = rows.len();
                 rows.push(TableRowEntry { node: Some(row_id), order: group_child_idx as u32 });
-                collect_cells_from_row(tree, row_id, row_index, &mut cells, &mut max_columns);
+                row_pending.push(collect_pending_cells(tree, row_id));
+            }
+        } else if is_caption {
+            captions.push(TableCaption {
+                node_id: child_id,
+                order: child_idx as u32,
+                side: caption_side,
+                height: 0.0,
+                margin_top: 0.0,
+                margin_bottom: 0.0,
+            });
+        } else if is_column {
+            let col_style = tree.get_table_child_style(child_id);
+            let span = col_style.colspan().max(1) as usize;
+            let width_dim = col_style.size().width;
+            drop(col_style);
+            column_hints.push((next_hint_col, span, width_dim.tag(), width_dim.value()));
+            next_hint_col += span;
+        } else if is_column_group {
+            // A column group either contains columns, or acts as `span` columns itself
+            let group_child_count = tree.child_count(child_id);
+            if group_child_count == 0 {
+                let group_style = tree.get_table_child_style(child_id);
+                let span = group_style.colspan().max(1) as usize;
+                let width_dim = group_style.size().width;
+                drop(group_style);
+                column_hints.push((next_hint_col, span, width_dim.tag(), width_dim.value()));
+                next_hint_col += span;
+            } else {
+                for group_child_idx in 0..group_child_count {
+                    let col_id = tree.get_child_id(child_id, group_child_idx);
+                    let col_style = tree.get_table_child_style(col_id);
+                    let span = col_style.colspan().max(1) as usize;
+                    let width_dim = col_style.size().width;
+                    drop(col_style);
+                    column_hints.push((next_hint_col, span, width_dim.tag(), width_dim.value()));
+                    next_hint_col += span;
+                }
             }
         } else {
             // Anonymous row member: a real TableCell, or any other child which gets
@@ -217,30 +322,74 @@ pub fn compute_table_layout(
                 None => {
                     let index = rows.len();
                     rows.push(TableRowEntry { node: None, order: child_idx as u32 });
+                    row_pending.push(Vec::new());
                     open_anonymous_row = Some(index);
-                    anonymous_col = 0;
                     index
                 }
             };
-
-            cells.push(TableCell {
+            row_pending[row_index].push(PendingCell {
                 node_id: child_id,
-                col_start: anonymous_col,
                 colspan,
-                row_index,
+                rowspan,
                 order: child_idx as u32,
                 parent_is_table: true,
             });
+        }
+    }
 
-            anonymous_col += colspan;
-            if anonymous_col > max_columns {
-                max_columns = anonymous_col;
+    // Place cells into the grid, skipping slots occupied by row-spanning cells from
+    // earlier rows (HTML table placement algorithm)
+    let num_rows = rows.len();
+    let mut cells: Vec<TableCell> = Vec::new();
+    let mut max_columns: usize = 0;
+    // occupancy[col] = number of rows (including the current one) this column is
+    // still blocked for by a row-spanning cell
+    let mut occupancy: Vec<usize> = Vec::new();
+
+    for (row_idx, pending) in row_pending.iter().enumerate() {
+        let mut col = 0usize;
+        for cell in pending {
+            while col < occupancy.len() && occupancy[col] > 0 {
+                col += 1;
+            }
+            let rowspan = cell.rowspan.min(num_rows - row_idx).max(1);
+            let col_end = col + cell.colspan;
+            if occupancy.len() < col_end {
+                occupancy.resize(col_end, 0);
+            }
+            for slot in occupancy[col..col_end].iter_mut() {
+                *slot = rowspan;
+            }
+
+            cells.push(TableCell {
+                node_id: cell.node_id,
+                col_start: col,
+                colspan: cell.colspan,
+                row_start: row_idx,
+                rowspan,
+                order: cell.order,
+                parent_is_table: cell.parent_is_table,
+            });
+
+            col = col_end;
+            if col_end > max_columns {
+                max_columns = col_end;
+            }
+        }
+        for slot in occupancy.iter_mut() {
+            if *slot > 0 {
+                *slot -= 1;
             }
         }
     }
 
+    // Columns declared via <col>/<colgroup> extend the grid even without cells
+    if next_hint_col > max_columns {
+        max_columns = next_hint_col;
+    }
+
     if max_columns == 0 || rows.is_empty() {
-        // Empty table
+        // Empty table (note: captions of cell-less tables are not rendered)
         let size = Size {
             width: styled_known_dimensions
                 .width
@@ -273,6 +422,14 @@ pub fn compute_table_layout(
         })
         .collect();
 
+    // Apply <col>/<colgroup> width hints first; cells then merge on top
+    for &(start, span, width_tag, width_value) in &column_hints {
+        let end = (start + span).min(max_columns);
+        for column in columns[start.min(max_columns)..end].iter_mut() {
+            column.apply_specified_width(width_tag, width_value);
+        }
+    }
+
     // Scan single-column cells to determine column width types and intrinsic sizes
     for cell in &cells {
         if cell.colspan > 1 {
@@ -295,22 +452,14 @@ pub fn compute_table_layout(
 
         // A column's specified width is the largest width specified by any of its
         // cells. Percentage widths take priority over fixed widths.
-        if width_tag == CompactLength::LENGTH_TAG {
-            // resolved_width represents the full column width (including cell padding/border),
-            // so for content-box cells we must add cell_pb to the CSS width value.
-            let fixed_w =
-                if cell_box_sizing == BoxSizing::ContentBox { width_dim.value() + cell_pb } else { width_dim.value() };
-            columns[col].fixed = Some(match columns[col].fixed {
-                Some(current) => f32_max(current, fixed_w),
-                None => fixed_w,
-            });
-        } else if width_tag == CompactLength::PERCENT_TAG {
-            let pct = width_dim.value();
-            columns[col].percent = Some(match columns[col].percent {
-                Some(current) => f32_max(current, pct),
-                None => pct,
-            });
-        }
+        // resolved_width represents the full column width (including cell padding/border),
+        // so for content-box cells we must add cell_pb to the CSS width value.
+        let width_value = if width_tag == CompactLength::LENGTH_TAG && cell_box_sizing == BoxSizing::ContentBox {
+            width_dim.value() + cell_pb
+        } else {
+            width_dim.value()
+        };
+        columns[col].apply_specified_width(width_tag, width_value);
 
         // Measure intrinsic cell size.
         // measure_child_size_both with SizingMode::ContentSize returns the outer size
@@ -432,11 +581,49 @@ pub fn compute_table_layout(
         })
         .collect();
 
+    // Measure captions at the table's width. Their heights stack above/below the
+    // grid; the caption box spans the full table width (wrapper box model).
+    let mut caption_top_height: f32 = 0.0;
+    let mut caption_bottom_height: f32 = 0.0;
+    for caption in captions.iter_mut() {
+        let caption_style = tree.get_core_container_style(caption.node_id);
+        let caption_margin = caption_style.margin().resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
+        drop(caption_style);
+        caption.margin_top = caption_margin.top;
+        caption.margin_bottom = caption_margin.bottom;
+
+        let measured = tree.compute_child_layout(
+            caption.node_id,
+            LayoutInput {
+                run_mode: RunMode::ComputeSize,
+                sizing_mode: SizingMode::InherentSize,
+                axis: RequestedAxis::Both,
+                known_dimensions: Size { width: Some(table_width), height: None },
+                parent_size: Size { width: Some(table_width), height: parent_size.height },
+                available_space: Size {
+                    width: AvailableSpace::Definite(table_width),
+                    height: AvailableSpace::MaxContent,
+                },
+                vertical_margins_are_collapsible: Line::FALSE,
+            },
+        );
+        caption.height = measured.size.height;
+
+        let outer_height = caption.height + caption.margin_top + caption.margin_bottom;
+        match caption.side {
+            CaptionSide::Top => caption_top_height += outer_height,
+            CaptionSide::Bottom => caption_bottom_height += outer_height,
+        }
+    }
+
+    // The grid (rows and cells) is offset below any top captions
+    let grid_offset_y = caption_top_height;
+
     // Phase 3: Measure cells at their resolved widths to compute row heights and the
     // table's first-row baseline. This is measure-only: layouts are not written here,
     // so pure ComputeSize passes never mutate the tree (matching block layout).
-    let num_rows = rows.len();
     let mut row_heights: Vec<f32> = vec![0.0; num_rows];
+    let mut cell_measured_heights: Vec<f32> = Vec::with_capacity(cells.len());
     let mut first_row_baseline: Option<f32> = None;
     #[cfg(feature = "content_size")]
     let mut measured_cell_content_sizes: Vec<Size<f32>> = Vec::with_capacity(cells.len());
@@ -458,18 +645,20 @@ pub fn compute_table_layout(
             },
         );
 
-        if cell.row_index < num_rows && measured.size.height > row_heights[cell.row_index] {
-            row_heights[cell.row_index] = measured.size.height;
+        cell_measured_heights.push(measured.size.height);
+
+        // Single-row cells establish the initial row heights
+        if cell.rowspan == 1 && measured.size.height > row_heights[cell.row_start] {
+            row_heights[cell.row_start] = measured.size.height;
         }
 
         // The table's baseline is the baseline of its first row (max cell baseline)
-        if cell.row_index == 0 {
+        if cell.row_start == 0 {
             if let Some(baseline) = measured.first_baselines.y {
-                first_row_baseline =
-                    Some(match first_row_baseline {
-                        Some(current) => f32_max(current, baseline),
-                        None => baseline,
-                    });
+                first_row_baseline = Some(match first_row_baseline {
+                    Some(current) => f32_max(current, baseline),
+                    None => baseline,
+                });
             }
         }
 
@@ -481,12 +670,32 @@ pub fn compute_table_layout(
         }
     }
 
+    // Row-spanning cells: if a cell is taller than the rows it spans, distribute the
+    // deficit equally among the spanned rows
+    for (cell_idx, cell) in cells.iter().enumerate() {
+        if cell.rowspan <= 1 {
+            continue;
+        }
+        let row_end = cell.row_start + cell.rowspan;
+        let current: f32 =
+            row_heights[cell.row_start..row_end].iter().sum::<f32>() + v_spacing * (cell.rowspan - 1) as f32;
+        let needed = cell_measured_heights[cell_idx];
+        if needed > current {
+            let extra = (needed - current) / cell.rowspan as f32;
+            for row_height in row_heights[cell.row_start..row_end].iter_mut() {
+                *row_height += extra;
+            }
+        }
+    }
+
     let total_row_height: f32 = row_heights.iter().sum();
     let total_v_spacing = v_spacing * (num_rows as f32 + 1.0);
     let table_content_height = total_row_height + total_v_spacing;
-    let table_height = styled_known_dimensions
+    // The height property applies to the table grid box; captions stack outside it
+    let grid_height = styled_known_dimensions
         .height
         .unwrap_or((table_content_height + padding_border_size.height).maybe_clamp(min_size.height, max_size.height));
+    let table_height = grid_height + caption_top_height + caption_bottom_height;
 
     let final_size = Size { width: table_width, height: table_height };
 
@@ -499,7 +708,7 @@ pub fn compute_table_layout(
     }
 
     let mut row_y_offsets: Vec<f32> = Vec::with_capacity(num_rows);
-    let mut y = padding_border.top + v_spacing;
+    let mut y = grid_offset_y + padding_border.top + v_spacing;
     for &rh in &row_heights {
         row_y_offsets.push(y);
         y += rh + v_spacing;
@@ -507,17 +716,22 @@ pub fn compute_table_layout(
 
     let first_baselines = Point { x: None, y: first_row_baseline.map(|b| row_y_offsets[0] + b) };
 
+    // The border-box height of a cell: the rows it spans plus the spacing between them
+    let cell_box_height = |cell: &TableCell| -> f32 {
+        let row_end = (cell.row_start + cell.rowspan).min(num_rows);
+        row_heights[cell.row_start..row_end].iter().sum::<f32>()
+            + v_spacing * (row_end.saturating_sub(cell.row_start + 1)) as f32
+    };
+
     // Accumulate the table's content size from the cells' measured content sizes
     #[cfg(feature = "content_size")]
     let table_content_size: Size<f32> = {
-        let mut content_size = Size { width: table_content_width, height: table_content_height };
+        let mut content_size =
+            Size { width: table_content_width, height: table_content_height + caption_top_height + caption_bottom_height };
         for (cell_idx, cell) in cells.iter().enumerate() {
             let location =
-                Point { x: col_x_offsets[cell.col_start], y: row_y_offsets.get(cell.row_index).copied().unwrap_or(0.0) };
-            let size = Size {
-                width: cell_widths[cell_idx],
-                height: row_heights.get(cell.row_index).copied().unwrap_or(0.0),
-            };
+                Point { x: col_x_offsets[cell.col_start], y: row_y_offsets.get(cell.row_start).copied().unwrap_or(0.0) };
+            let size = Size { width: cell_widths[cell_idx], height: cell_box_height(cell) };
             content_size = content_size.f32_max(compute_content_size_contribution(
                 location,
                 size,
@@ -534,17 +748,64 @@ pub fn compute_table_layout(
         return LayoutOutput::from_sizes_and_baselines(final_size, table_content_size, first_baselines);
     }
 
-    // Phase 4: Perform final layout and position cells
+    // Phase 4: Perform final layout and position captions, cells, rows, and columns
+    let mut caption_top_cursor: f32 = 0.0;
+    let mut caption_bottom_cursor: f32 = grid_offset_y + grid_height;
+    for caption in &captions {
+        let caption_output = tree.perform_child_layout(
+            caption.node_id,
+            Size { width: Some(table_width), height: Some(caption.height) },
+            Size { width: Some(table_width), height: Some(table_height) },
+            Size { width: AvailableSpace::Definite(table_width), height: AvailableSpace::Definite(caption.height) },
+            SizingMode::InherentSize,
+            Line::FALSE,
+        );
+
+        let caption_style = tree.get_core_container_style(caption.node_id);
+        let caption_padding = caption_style.padding().resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
+        let caption_border = caption_style.border().resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
+        let caption_margin = caption_style.margin().resolve_or_zero(parent_width, |v, b| tree.calc(v, b));
+        drop(caption_style);
+
+        let y = match caption.side {
+            CaptionSide::Top => {
+                let y = caption_top_cursor + caption.margin_top;
+                caption_top_cursor += caption.height + caption.margin_top + caption.margin_bottom;
+                y
+            }
+            CaptionSide::Bottom => {
+                let y = caption_bottom_cursor + caption.margin_top;
+                caption_bottom_cursor += caption.height + caption.margin_top + caption.margin_bottom;
+                y
+            }
+        };
+
+        tree.set_unrounded_layout(
+            caption.node_id,
+            &Layout {
+                order: caption.order,
+                location: Point { x: 0.0, y },
+                size: Size { width: table_width, height: caption.height },
+                #[cfg(feature = "content_size")]
+                content_size: caption_output.content_size,
+                scrollbar_size: Size::ZERO,
+                padding: caption_padding,
+                border: caption_border,
+                margin: caption_margin,
+            },
+        );
+    }
+
     #[cfg(feature = "content_size")]
     let mut row_content_sizes: Vec<Size<f32>> = vec![Size::ZERO; num_rows];
 
     for (cell_idx, cell) in cells.iter().enumerate() {
-        if cell.row_index >= num_rows || cell.col_start >= max_columns {
+        if cell.row_start >= num_rows || cell.col_start >= max_columns {
             continue;
         }
 
         let cell_width = cell_widths[cell_idx];
-        let cell_height = row_heights[cell.row_index];
+        let cell_height = cell_box_height(cell);
 
         // Re-layout the cell with final dimensions
         let cell_output = tree.perform_child_layout(
@@ -570,16 +831,17 @@ pub fn compute_table_layout(
 
         // Cells inside real rows are positioned relative to their row; cells in
         // anonymous rows are children of the table and use table coordinates.
+        // Row-spanning cells extend below their starting row's box.
         let location = if cell.parent_is_table {
-            Point { x: col_x_offsets[cell.col_start], y: row_y_offsets[cell.row_index] }
+            Point { x: col_x_offsets[cell.col_start], y: row_y_offsets[cell.row_start] }
         } else {
             Point { x: col_x_offsets[cell.col_start] - padding_border.left, y: 0.0 }
         };
 
         #[cfg(feature = "content_size")]
         if !cell.parent_is_table {
-            row_content_sizes[cell.row_index] =
-                row_content_sizes[cell.row_index].f32_max(compute_content_size_contribution(
+            row_content_sizes[cell.row_start] =
+                row_content_sizes[cell.row_start].f32_max(compute_content_size_contribution(
                     location,
                     Size { width: cell_width, height: cell_height },
                     cell_output.content_size,
@@ -610,12 +872,28 @@ pub fn compute_table_layout(
     let mut row_parent_offset_y: Vec<f32> = vec![0.0; num_rows];
     let mut row_parent_offset_x: Vec<f32> = vec![0.0; num_rows];
 
-    // Set layouts for row group nodes (do this first so we know parent offsets for rows)
+    // Set layouts for row group and column nodes (groups first so we know parent
+    // offsets for rows)
     for child_idx in 0..child_count {
         let child_id = tree.get_child_id(node_id, child_idx);
         let child_style = tree.get_table_child_style(child_id);
         let is_row_group = child_style.is_table_row_group();
+        let is_column = child_style.is_table_column();
+        let is_column_group = child_style.is_table_column_group();
         drop(child_style);
+
+        if is_column || is_column_group {
+            // Columns generate no boxes
+            tree.set_unrounded_layout(child_id, &Layout::with_order(child_idx as u32));
+            if is_column_group {
+                let group_child_count = tree.child_count(child_id);
+                for group_child_idx in 0..group_child_count {
+                    let col_id = tree.get_child_id(child_id, group_child_idx);
+                    tree.set_unrounded_layout(col_id, &Layout::with_order(group_child_idx as u32));
+                }
+            }
+            continue;
+        }
 
         if is_row_group {
             let group_child_count = tree.child_count(child_id);
@@ -625,7 +903,7 @@ pub fn compute_table_layout(
             }
 
             // Find the y range of rows in this group
-            let mut start_y = padding_border.top + v_spacing;
+            let mut start_y = grid_offset_y + padding_border.top + v_spacing;
             let mut end_y = start_y;
             #[cfg(feature = "content_size")]
             let mut group_content_size = Size::ZERO;
@@ -714,40 +992,24 @@ pub fn compute_table_layout(
     LayoutOutput::from_sizes_and_baselines(final_size, table_content_size, first_baselines)
 }
 
-/// Collect cells from a row node's children. All children of a row are treated as
-/// cells: non-cell children are wrapped in anonymous cells per CSS 2.1 §17.2.1
-/// (i.e. treated as the cell itself).
-fn collect_cells_from_row(
-    tree: &mut impl LayoutTableContainer,
-    row_id: NodeId,
-    row_index: usize,
-    cells: &mut Vec<TableCell>,
-    max_columns: &mut usize,
-) {
+/// Collect the cells of a row node. All children of a row are treated as cells:
+/// non-cell children are wrapped in anonymous cells per CSS 2.1 §17.2.1 (i.e.
+/// treated as the cell itself).
+fn collect_pending_cells(tree: &mut impl LayoutTableContainer, row_id: NodeId) -> Vec<PendingCell> {
     let cell_count = tree.child_count(row_id);
-    let mut col = 0;
+    let mut pending = Vec::with_capacity(cell_count);
 
     for cell_idx in 0..cell_count {
         let cell_id = tree.get_child_id(row_id, cell_idx);
         let cell_style = tree.get_table_child_style(cell_id);
         let colspan = cell_style.colspan().max(1) as usize;
+        let rowspan = cell_style.rowspan().max(1) as usize;
         drop(cell_style);
 
-        cells.push(TableCell {
-            node_id: cell_id,
-            col_start: col,
-            colspan,
-            row_index,
-            order: cell_idx as u32,
-            parent_is_table: false,
-        });
-
-        col += colspan;
+        pending.push(PendingCell { node_id: cell_id, colspan, rowspan, order: cell_idx as u32, parent_is_table: false });
     }
 
-    if col > *max_columns {
-        *max_columns = col;
-    }
+    pending
 }
 
 /// Raise the given columns' widths (selected by `field`) so that they can jointly
@@ -825,8 +1087,11 @@ fn distribute_column_widths(columns: &mut [ColumnInfo], target: f32, is_fixed_la
             let sum_diff = sum_max - sum_min;
             for col in columns.iter_mut().filter(|c| c.is_auto()) {
                 let min_w = col_min_w(col, is_fixed_layout);
-                let share =
-                    if sum_diff > 0.0 { (col_max_w(col, is_fixed_layout) - min_w) / sum_diff } else { 1.0 / auto_count as f32 };
+                let share = if sum_diff > 0.0 {
+                    (col_max_w(col, is_fixed_layout) - min_w) / sum_diff
+                } else {
+                    1.0 / auto_count as f32
+                };
                 col.resolved_width = min_w + pool * share;
             }
         } else {

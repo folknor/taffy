@@ -281,6 +281,9 @@ fn build_style<S: CheapCloneStr>(xnode: roxmltree::Node) -> taffy::Style<S> {
         border_spacing: Size::zero(),
         table_layout: Default::default(),
         colspan: 1,
+        rowspan: 1,
+        border_collapse: Default::default(),
+        caption_side: Default::default(),
 
         aspect_ratio: maybe_parse(xnode.attribute("aspect-ratio")),
         align_items: maybe_parse(xnode.attribute("align-items")),

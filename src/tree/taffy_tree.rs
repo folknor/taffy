@@ -256,6 +256,12 @@ impl<NodeContext> PrintTree for TaffyTree<NodeContext> {
             (_, Display::TableRow) => "TABLE-ROW",
             #[cfg(feature = "table_layout")]
             (_, Display::TableCell) => "TABLE-CELL",
+            #[cfg(feature = "table_layout")]
+            (_, Display::TableCaption) => "TABLE-CAPTION",
+            #[cfg(feature = "table_layout")]
+            (_, Display::TableColumn) => "TABLE-COLUMN",
+            #[cfg(feature = "table_layout")]
+            (_, Display::TableColumnGroup) => "TABLE-COLUMN-GROUP",
         }
     }
 
@@ -339,6 +345,17 @@ where
                 (Display::TableCell, true) => {
                     // Cells are block containers internally
                     compute_block_layout(tree, node_id, inputs, block_ctx)
+                }
+                #[cfg(feature = "table_layout")]
+                (Display::TableCaption, true) => {
+                    // Captions are block containers; their table positions them
+                    compute_block_layout(tree, node_id, inputs, block_ctx)
+                }
+                #[cfg(feature = "table_layout")]
+                (Display::TableColumn | Display::TableColumnGroup, _) => {
+                    // Columns and column groups generate no boxes; they only
+                    // contribute width hints when inside a table
+                    compute_hidden_layout(tree, node_id)
                 }
                 (_, false) => {
                     let node_key = node_id.into();

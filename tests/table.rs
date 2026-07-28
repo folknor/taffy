@@ -1,7 +1,7 @@
 #[cfg(feature = "table_layout")]
 mod table_tests {
     use taffy::prelude::*;
-    use taffy::style::{Display, LengthPercentage, TableLayout};
+    use taffy::style::{BorderCollapse, CaptionSide, Display, LengthPercentage, TableLayout};
     use taffy::BoxSizing;
 
     #[test]
@@ -1339,5 +1339,240 @@ mod table_tests {
 
         assert_eq!(taffy.layout(cell_narrow).unwrap().size.width, 140.0, "Column should use the max specified width");
         assert_eq!(taffy.layout(cell_wide).unwrap().size.width, 140.0);
+    }
+
+    #[test]
+    fn rowspan_occupies_grid_and_distributes_height() {
+        // Cell A spans 2 rows and is 80px tall; the second row's cell must be
+        // placed in column 1 (col 0 is occupied), and A's extra height (80 vs
+        // 30+30) is distributed to the spanned rows (40/40).
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let cell_a = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                rowspan: 2,
+                size: Size::from_lengths(100.0, 80.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell_b = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell_c = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let row0 = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell_a, cell_b])
+            .unwrap();
+        let row1 =
+            taffy.new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell_c]).unwrap();
+        let table = taffy
+            .new_with_children(Style { display: Display::Table, ..Default::default() }, &[row0, row1])
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert_eq!(table_layout.size.width, 200.0, "Two 100px columns");
+        assert_eq!(table_layout.size.height, 80.0, "Rows grow to fit the spanning cell (40 + 40)");
+
+        // C lands in column 1, not column 0
+        assert_eq!(taffy.layout(cell_c).unwrap().location.x, 100.0, "Row-1 cell must skip the occupied column 0");
+        // A's box spans both rows
+        assert_eq!(taffy.layout(cell_a).unwrap().size.height, 80.0);
+        // Rows got the distributed height
+        assert_eq!(taffy.layout(row0).unwrap().size.height, 40.0);
+        assert_eq!(taffy.layout(row1).unwrap().size.height, 40.0);
+        assert_eq!(taffy.layout(row1).unwrap().location.y, 40.0);
+        // B stretches to its row's height, not the full span
+        assert_eq!(taffy.layout(cell_b).unwrap().size.height, 40.0);
+    }
+
+    #[test]
+    fn border_collapse_suppresses_spacing() {
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let cell0 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell1 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell0, cell1])
+            .unwrap();
+        let table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    border_collapse: BorderCollapse::Collapse,
+                    border_spacing: Size { width: LengthPercentage::length(10.0), height: LengthPercentage::length(10.0) },
+                    ..Default::default()
+                },
+                &[row],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert_eq!(table_layout.size.width, 200.0, "border-spacing must not apply when collapsed");
+        assert_eq!(table_layout.size.height, 30.0);
+        assert_eq!(taffy.layout(cell0).unwrap().location.x, 0.0);
+        assert_eq!(taffy.layout(cell1).unwrap().location.x, 100.0);
+    }
+
+    #[test]
+    fn cell_align_content_gives_vertical_align() {
+        // Cells are block containers laid out at the full row height, so
+        // align_content on a cell behaves like vertical-align (HTML valign).
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let content = taffy.new_leaf(Style { size: Size::from_lengths(50.0, 20.0), ..Default::default() }).unwrap();
+        let valign_middle_cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    align_content: Some(AlignContent::CENTER),
+                    ..Default::default()
+                },
+                &[content],
+            )
+            .unwrap();
+        let tall_cell = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(50.0, 100.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[valign_middle_cell, tall_cell])
+            .unwrap();
+        let table =
+            taffy.new_with_children(Style { display: Display::Table, ..Default::default() }, &[row]).unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        assert_eq!(taffy.layout(valign_middle_cell).unwrap().size.height, 100.0, "Cell fills the row height");
+        assert_eq!(
+            taffy.layout(content).unwrap().location.y,
+            40.0,
+            "align_content: center should vertically center the 20px content in the 100px cell"
+        );
+    }
+
+    #[test]
+    fn captions_stack_above_and_below_grid() {
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let top_caption = taffy
+            .new_leaf(Style {
+                display: Display::TableCaption,
+                size: Size { width: Dimension::AUTO, height: Dimension::from_length(30.0) },
+                ..Default::default()
+            })
+            .unwrap();
+        let bottom_caption = taffy
+            .new_leaf(Style {
+                display: Display::TableCaption,
+                caption_side: CaptionSide::Bottom,
+                size: Size { width: Dimension::AUTO, height: Dimension::from_length(20.0) },
+                ..Default::default()
+            })
+            .unwrap();
+        let cell = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(200.0, 50.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let row =
+            taffy.new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell]).unwrap();
+        let table = taffy
+            .new_with_children(
+                Style { display: Display::Table, ..Default::default() },
+                &[top_caption, row, bottom_caption],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert_eq!(table_layout.size.width, 200.0);
+        assert_eq!(table_layout.size.height, 100.0, "grid 50 + top caption 30 + bottom caption 20");
+
+        let top_layout = taffy.layout(top_caption).unwrap();
+        assert_eq!(top_layout.location.y, 0.0);
+        assert_eq!(top_layout.size.width, 200.0, "Caption spans the full table width");
+        assert_eq!(top_layout.size.height, 30.0);
+
+        assert_eq!(taffy.layout(row).unwrap().location.y, 30.0, "Grid is shifted below the top caption");
+
+        let bottom_layout = taffy.layout(bottom_caption).unwrap();
+        assert_eq!(bottom_layout.location.y, 80.0, "Bottom caption goes after the 30+50 grid");
+        assert_eq!(bottom_layout.size.height, 20.0);
+    }
+
+    #[test]
+    fn col_elements_provide_column_widths() {
+        // <colgroup><col width=120><col></colgroup> — the first column takes its
+        // width from the col element even though its cells are narrower.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let col0 = taffy
+            .new_leaf(Style {
+                display: Display::TableColumn,
+                size: Size { width: Dimension::from_length(120.0), height: Dimension::AUTO },
+                ..Default::default()
+            })
+            .unwrap();
+        let col1 = taffy.new_leaf(Style { display: Display::TableColumn, ..Default::default() }).unwrap();
+        let colgroup = taffy
+            .new_with_children(Style { display: Display::TableColumnGroup, ..Default::default() }, &[col0, col1])
+            .unwrap();
+
+        let cell0 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(50.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell1 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(50.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell0, cell1])
+            .unwrap();
+        let table = taffy
+            .new_with_children(Style { display: Display::Table, ..Default::default() }, &[colgroup, row])
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        assert_eq!(taffy.layout(cell0).unwrap().size.width, 120.0, "Column 0 takes the col element's 120px width");
+        assert_eq!(taffy.layout(cell1).unwrap().size.width, 50.0, "Column 1 stays at its cell's width");
+        assert_eq!(taffy.layout(table).unwrap().size.width, 170.0);
+        // Column nodes generate no boxes
+        assert_eq!(taffy.layout(colgroup).unwrap().size.width, 0.0);
+        assert_eq!(taffy.layout(col0).unwrap().size.width, 0.0);
     }
 }

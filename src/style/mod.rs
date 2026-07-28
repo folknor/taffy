@@ -37,7 +37,7 @@ pub use self::grid::{
     GridTemplateTracks, MaxTrackSizingFunction, MinTrackSizingFunction, RepetitionCount, TrackSizingFunction,
 };
 #[cfg(feature = "table_layout")]
-pub use self::table::{TableContainerStyle, TableItemStyle, TableLayout};
+pub use self::table::{BorderCollapse, CaptionSide, TableContainerStyle, TableItemStyle, TableLayout};
 #[cfg(feature = "grid")]
 pub(crate) use self::grid::{GridAreaAxis, GridAreaEnd};
 #[cfg(feature = "grid")]
@@ -207,6 +207,15 @@ pub enum Display {
     /// A table cell (<td>, <th>)
     #[cfg(feature = "table_layout")]
     TableCell,
+    /// A table caption (<caption>), laid out as a block above or below the table grid
+    #[cfg(feature = "table_layout")]
+    TableCaption,
+    /// A table column (<col>). Generates no box; contributes width hints to its column
+    #[cfg(feature = "table_layout")]
+    TableColumn,
+    /// A table column group (<colgroup>). Generates no box; contains table columns
+    #[cfg(feature = "table_layout")]
+    TableColumnGroup,
     /// The node is hidden, and it's children will also be hidden
     None,
 }
@@ -264,6 +273,12 @@ impl core::fmt::Display for Display {
             Display::TableRow => write!(f, "TABLE-ROW"),
             #[cfg(feature = "table_layout")]
             Display::TableCell => write!(f, "TABLE-CELL"),
+            #[cfg(feature = "table_layout")]
+            Display::TableCaption => write!(f, "TABLE-CAPTION"),
+            #[cfg(feature = "table_layout")]
+            Display::TableColumn => write!(f, "TABLE-COLUMN"),
+            #[cfg(feature = "table_layout")]
+            Display::TableColumnGroup => write!(f, "TABLE-COLUMN-GROUP"),
         }
     }
 }
@@ -551,9 +566,19 @@ pub struct Style<S: CheapCloneStr = DefaultCheapStr> {
     /// The table layout algorithm (CSS `table-layout` property)
     #[cfg(feature = "table_layout")]
     pub table_layout: TableLayout,
-    /// The number of columns this cell spans (colspan attribute)
+    /// The number of columns this cell spans (colspan attribute).
+    /// Also used as the `span` attribute for table columns.
     #[cfg(feature = "table_layout")]
     pub colspan: u16,
+    /// The number of rows this cell spans (rowspan attribute)
+    #[cfg(feature = "table_layout")]
+    pub rowspan: u16,
+    /// The border model (CSS `border-collapse` property)
+    #[cfg(feature = "table_layout")]
+    pub border_collapse: BorderCollapse,
+    /// Which side of the table a caption goes on (CSS `caption-side` property, set on the caption)
+    #[cfg(feature = "table_layout")]
+    pub caption_side: CaptionSide,
 
     // Block container properties
     /// How items elements should aligned in the inline axis
@@ -666,6 +691,12 @@ impl<S: CheapCloneStr> Style<S> {
         table_layout: TableLayout::Auto,
         #[cfg(feature = "table_layout")]
         colspan: 1,
+        #[cfg(feature = "table_layout")]
+        rowspan: 1,
+        #[cfg(feature = "table_layout")]
+        border_collapse: BorderCollapse::Separate,
+        #[cfg(feature = "table_layout")]
+        caption_side: CaptionSide::Top,
         // Block
         #[cfg(feature = "block_layout")]
         text_align: TextAlign::Auto,
@@ -717,6 +748,10 @@ impl<S: CheapCloneStr> CoreStyle for Style<S> {
     fn box_generation_mode(&self) -> BoxGenerationMode {
         match self.display {
             Display::None => BoxGenerationMode::None,
+            // Table columns and column groups contribute width hints to their table
+            // but generate no boxes of their own (CSS 2.1 §17.2)
+            #[cfg(feature = "table_layout")]
+            Display::TableColumn | Display::TableColumnGroup => BoxGenerationMode::None,
             _ => BoxGenerationMode::Normal,
         }
     }
@@ -728,7 +763,14 @@ impl<S: CheapCloneStr> CoreStyle for Style<S> {
         // a BFC with siblings. Orphaned rows/row-groups/cells fall back to block.
         #[cfg(feature = "table_layout")]
         {
-            matches!(self.display, Display::Block | Display::TableRowGroup | Display::TableRow | Display::TableCell)
+            matches!(
+                self.display,
+                Display::Block
+                    | Display::TableRowGroup
+                    | Display::TableRow
+                    | Display::TableCell
+                    | Display::TableCaption
+            )
         }
         #[cfg(not(feature = "table_layout"))]
         {
@@ -946,6 +988,11 @@ impl<S: CheapCloneStr> TableContainerStyle for Style<S> {
     fn table_layout(&self) -> TableLayout {
         self.table_layout
     }
+
+    #[inline(always)]
+    fn border_collapse(&self) -> BorderCollapse {
+        self.border_collapse
+    }
 }
 
 #[cfg(feature = "table_layout")]
@@ -959,6 +1006,11 @@ impl<T: TableContainerStyle> TableContainerStyle for &'_ T {
     fn table_layout(&self) -> TableLayout {
         (*self).table_layout()
     }
+
+    #[inline(always)]
+    fn border_collapse(&self) -> BorderCollapse {
+        (*self).border_collapse()
+    }
 }
 
 #[cfg(feature = "table_layout")]
@@ -966,6 +1018,11 @@ impl<S: CheapCloneStr> TableItemStyle for Style<S> {
     #[inline(always)]
     fn colspan(&self) -> u16 {
         self.colspan
+    }
+
+    #[inline(always)]
+    fn rowspan(&self) -> u16 {
+        self.rowspan
     }
 
     #[inline(always)]
@@ -982,6 +1039,26 @@ impl<S: CheapCloneStr> TableItemStyle for Style<S> {
     fn is_table_cell(&self) -> bool {
         matches!(self.display, Display::TableCell)
     }
+
+    #[inline(always)]
+    fn is_table_caption(&self) -> bool {
+        matches!(self.display, Display::TableCaption)
+    }
+
+    #[inline(always)]
+    fn is_table_column(&self) -> bool {
+        matches!(self.display, Display::TableColumn)
+    }
+
+    #[inline(always)]
+    fn is_table_column_group(&self) -> bool {
+        matches!(self.display, Display::TableColumnGroup)
+    }
+
+    #[inline(always)]
+    fn caption_side(&self) -> CaptionSide {
+        self.caption_side
+    }
 }
 
 #[cfg(feature = "table_layout")]
@@ -989,6 +1066,11 @@ impl<T: TableItemStyle> TableItemStyle for &'_ T {
     #[inline(always)]
     fn colspan(&self) -> u16 {
         (*self).colspan()
+    }
+
+    #[inline(always)]
+    fn rowspan(&self) -> u16 {
+        (*self).rowspan()
     }
 
     #[inline(always)]
@@ -1004,6 +1086,26 @@ impl<T: TableItemStyle> TableItemStyle for &'_ T {
     #[inline(always)]
     fn is_table_cell(&self) -> bool {
         (*self).is_table_cell()
+    }
+
+    #[inline(always)]
+    fn is_table_caption(&self) -> bool {
+        (*self).is_table_caption()
+    }
+
+    #[inline(always)]
+    fn is_table_column(&self) -> bool {
+        (*self).is_table_column()
+    }
+
+    #[inline(always)]
+    fn is_table_column_group(&self) -> bool {
+        (*self).is_table_column_group()
+    }
+
+    #[inline(always)]
+    fn caption_side(&self) -> CaptionSide {
+        (*self).caption_side()
     }
 }
 
@@ -1376,6 +1478,12 @@ mod tests {
             table_layout: Default::default(),
             #[cfg(feature = "table_layout")]
             colspan: 1,
+            #[cfg(feature = "table_layout")]
+            rowspan: 1,
+            #[cfg(feature = "table_layout")]
+            border_collapse: Default::default(),
+            #[cfg(feature = "table_layout")]
+            caption_side: Default::default(),
             #[cfg(feature = "block_layout")]
             text_align: Default::default(),
             #[cfg(feature = "flexbox")]
