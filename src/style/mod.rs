@@ -36,14 +36,14 @@ pub use self::grid::{
     GridContainerStyle, GridItemStyle, GridPlacement, GridTemplateComponent, GridTemplateRepetition,
     GridTemplateTracks, MaxTrackSizingFunction, MinTrackSizingFunction, RepetitionCount, TrackSizingFunction,
 };
-#[cfg(feature = "table_layout")]
-pub use self::table::{BorderCollapse, CaptionSide, TableContainerStyle, TableItemStyle, TableLayout};
 #[cfg(feature = "grid")]
 pub(crate) use self::grid::{GridAreaAxis, GridAreaEnd};
 #[cfg(feature = "grid")]
 pub use self::grid::{GridTemplateArea, NamedGridLine, TemplateLineNames};
 #[cfg(feature = "grid")]
 pub(crate) use self::grid::{NonNamedGridPlacement, OriginZeroGridPlacement};
+#[cfg(feature = "table_layout")]
+pub use self::table::{BorderCollapse, CaptionSide, TableContainerStyle, TableItemStyle, TableLayout};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::style_helpers::TaffyAuto as _;

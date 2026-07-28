@@ -145,23 +145,22 @@ impl ColumnInfo {
     }
 }
 
-/// The width this column contributes to the table's minimum content width
+/// The width this column contributes to the table's minimum content width.
+///
+/// Under automatic layout this is purely content-driven: a width specified on a
+/// column (by a cell or a `<col>`) contributes to the table's *preferred* width
+/// (see `col_max_w`) but never raises its minimum, so a table whose columns carry
+/// widths wider than their containing block still shrinks to fit rather than
+/// overflowing it — browsers never blow out horizontally on a stale `width` attr.
+/// (A width specified on the *table itself* is different: that does floor at the
+/// table's min-content width.)
 fn col_min_w(col: &ColumnInfo, is_fixed_layout: bool) -> f32 {
+    if !is_fixed_layout {
+        return col.min_content_width;
+    }
     match (col.percent, col.fixed) {
-        (Some(_), _) => {
-            if is_fixed_layout {
-                0.0
-            } else {
-                col.min_content_width
-            }
-        }
-        (None, Some(fixed)) => {
-            if is_fixed_layout {
-                fixed
-            } else {
-                f32_max(fixed, col.min_content_width)
-            }
-        }
+        (Some(_), _) => 0.0,
+        (None, Some(fixed)) => fixed,
         (None, None) => col.min_content_width,
     }
 }
@@ -653,7 +652,10 @@ pub fn compute_table_layout(
                 axis: RequestedAxis::Both,
                 known_dimensions: Size { width: Some(cell_width), height: None },
                 parent_size: cell_percentage_basis,
-                available_space: Size { width: AvailableSpace::Definite(cell_width), height: AvailableSpace::MaxContent },
+                available_space: Size {
+                    width: AvailableSpace::Definite(cell_width),
+                    height: AvailableSpace::MaxContent,
+                },
                 vertical_margins_are_collapsible: Line::FALSE,
             },
         );
@@ -768,11 +770,15 @@ pub fn compute_table_layout(
     // Accumulate the table's content size from the cells' measured content sizes
     #[cfg(feature = "content_size")]
     let table_content_size: Size<f32> = {
-        let mut content_size =
-            Size { width: table_content_width, height: table_content_height + caption_top_height + caption_bottom_height };
+        let mut content_size = Size {
+            width: table_content_width,
+            height: table_content_height + caption_top_height + caption_bottom_height,
+        };
         for (cell_idx, cell) in cells.iter().enumerate() {
-            let location =
-                Point { x: col_x_offsets[cell.col_start], y: row_y_offsets.get(cell.row_start).copied().unwrap_or(0.0) };
+            let location = Point {
+                x: col_x_offsets[cell.col_start],
+                y: row_y_offsets.get(cell.row_start).copied().unwrap_or(0.0),
+            };
             let size = Size { width: cell_widths[cell_idx], height: cell_box_height(cell) };
             content_size = content_size.f32_max(compute_content_size_contribution(
                 location,
@@ -1048,7 +1054,13 @@ fn collect_pending_cells(tree: &mut impl LayoutTableContainer, row_id: NodeId) -
         let rowspan = cell_style.rowspan().max(1) as usize;
         drop(cell_style);
 
-        pending.push(PendingCell { node_id: cell_id, colspan, rowspan, order: cell_idx as u32, parent_is_table: false });
+        pending.push(PendingCell {
+            node_id: cell_id,
+            colspan,
+            rowspan,
+            order: cell_idx as u32,
+            parent_is_table: false,
+        });
     }
 
     pending
@@ -1086,7 +1098,9 @@ fn raise_columns_to_fit(columns: &mut [ColumnInfo], target: f32, field: impl Fn(
 /// - Percentage columns resolve against the target width (floored at min-content
 ///   under automatic layout; exact under `table-layout: fixed`)
 /// - Fixed columns use their specified width (floored at min-content under
-///   automatic layout; exact under `table-layout: fixed`)
+///   automatic layout; exact under `table-layout: fixed`). Under automatic layout
+///   they shrink towards min-content when the table is too narrow for them, since
+///   a specified column width does not raise the table's minimum (see `col_min_w`)
 /// - Auto columns share the remaining space: below their combined min-content they
 ///   overflow at min-content; between min and max they grow proportionally to
 ///   (max - min); above max the excess is distributed proportionally to max
@@ -1103,8 +1117,33 @@ fn distribute_column_widths(columns: &mut [ColumnInfo], target: f32, is_fixed_la
             let w = pct * target;
             col.resolved_width = if is_fixed_layout { f32_max(w, 0.0) } else { f32_max(w, col.min_content_width) };
             remaining -= col.resolved_width;
-        } else if col.fixed.is_some() {
-            col.resolved_width = col_min_w(col, is_fixed_layout);
+        }
+    }
+
+    // Columns with a specified (non-percentage) width. They prefer that width, but
+    // under automatic layout it is not part of the table's minimum, so the table may
+    // be narrower than the sum of the specified widths. When it is, they shrink
+    // proportionally towards their min-content widths, leaving the auto columns their
+    // minimums. (Under `table-layout: fixed` preferred == floor == the specified
+    // width, so this is a no-op there.)
+    let is_specified = |col: &ColumnInfo| col.percent.is_none() && col.fixed.is_some();
+    let specified_pref: f32 = columns.iter().filter(|c| is_specified(c)).map(|c| col_max_w(c, is_fixed_layout)).sum();
+    let specified_floor: f32 = columns.iter().filter(|c| is_specified(c)).map(|c| col_min_w(c, is_fixed_layout)).sum();
+    let auto_floor: f32 = columns.iter().filter(|c| c.is_auto()).map(|c| col_min_w(c, is_fixed_layout)).sum();
+    let space_for_specified = remaining - auto_floor;
+
+    if space_for_specified >= specified_pref {
+        for col in columns.iter_mut().filter(|c| is_specified(c)) {
+            col.resolved_width = col_max_w(col, is_fixed_layout);
+            remaining -= col.resolved_width;
+        }
+    } else {
+        let pool = f32_max(space_for_specified - specified_floor, 0.0);
+        let sum_diff = specified_pref - specified_floor;
+        for col in columns.iter_mut().filter(|c| is_specified(c)) {
+            let floor = col_min_w(col, is_fixed_layout);
+            let share = if sum_diff > 0.0 { (col_max_w(col, is_fixed_layout) - floor) / sum_diff } else { 0.0 };
+            col.resolved_width = floor + pool * share;
             remaining -= col.resolved_width;
         }
     }
