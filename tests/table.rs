@@ -1057,4 +1057,287 @@ mod table_tests {
             row_layout.size.height
         );
     }
+
+    /// Helper: a 2-cell single-row table where each cell holds a wrappable flex
+    /// container (two 100x20 leaves, wrap) so min-content = 100 and max-content = 200.
+    fn wrappable_table(taffy: &mut TaffyTree<()>, table_style: Style) -> (NodeId, NodeId, NodeId) {
+        let make_cell = |taffy: &mut TaffyTree<()>| {
+            let leaf_a = taffy.new_leaf(Style { size: Size::from_lengths(100.0, 20.0), ..Default::default() }).unwrap();
+            let leaf_b = taffy.new_leaf(Style { size: Size::from_lengths(100.0, 20.0), ..Default::default() }).unwrap();
+            let flex = taffy
+                .new_with_children(
+                    Style { display: Display::Flex, flex_wrap: FlexWrap::Wrap, ..Default::default() },
+                    &[leaf_a, leaf_b],
+                )
+                .unwrap();
+            taffy.new_with_children(Style { display: Display::TableCell, ..Default::default() }, &[flex]).unwrap()
+        };
+        let cell0 = make_cell(taffy);
+        let cell1 = make_cell(taffy);
+        let row = taffy
+            .new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell0, cell1])
+            .unwrap();
+        let table = taffy.new_with_children(table_style, &[row]).unwrap();
+        (table, cell0, cell1)
+    }
+
+    #[test]
+    fn auto_table_shrinks_in_narrow_container() {
+        // A 2-column auto table (each column min 100 / max 200) inside a narrow
+        // definite space must shrink below its max-content width (400) by wrapping
+        // cell content, down to no less than its min-content width (200).
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let (table, cell0, cell1) = wrappable_table(&mut taffy, Style { display: Display::Table, ..Default::default() });
+
+        taffy
+            .compute_layout(table, Size { width: AvailableSpace::Definite(300.0), height: AvailableSpace::MaxContent })
+            .unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert_eq!(table_layout.size.width, 300.0, "Table should shrink to fit 300px, got {}", table_layout.size.width);
+        // Both columns are identical, so each gets half
+        assert_eq!(taffy.layout(cell0).unwrap().size.width, 150.0);
+        assert_eq!(taffy.layout(cell1).unwrap().size.width, 150.0);
+        // Wrapped content makes rows taller
+        assert_eq!(table_layout.size.height, 40.0, "Cells should wrap to two 20px lines");
+    }
+
+    #[test]
+    fn auto_table_floors_at_min_content_width() {
+        // Below min-content width the table stops shrinking and overflows instead
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let (table, cell0, _) = wrappable_table(&mut taffy, Style { display: Display::Table, ..Default::default() });
+
+        taffy
+            .compute_layout(table, Size { width: AvailableSpace::Definite(120.0), height: AvailableSpace::MaxContent })
+            .unwrap();
+
+        assert_eq!(taffy.layout(table).unwrap().size.width, 200.0, "Table must not shrink below min-content (200)");
+        assert_eq!(taffy.layout(cell0).unwrap().size.width, 100.0);
+    }
+
+    #[test]
+    fn auto_table_does_not_stretch_in_block_parent() {
+        // A table child of a block container must shrink-to-fit, not stretch-fit
+        // like a regular block child (no `item_is_table` flag needed).
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let cell = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let row =
+            taffy.new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell]).unwrap();
+        let table =
+            taffy.new_with_children(Style { display: Display::Table, ..Default::default() }, &[row]).unwrap();
+        let block = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Block,
+                    size: Size { width: Dimension::from_length(500.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[table],
+            )
+            .unwrap();
+
+        taffy.compute_layout(block, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert_eq!(table_layout.size.width, 100.0, "Auto table should shrink-to-fit, got {}", table_layout.size.width);
+    }
+
+    #[test]
+    fn table_margins_not_double_subtracted_in_block_parent() {
+        // Block parents already subtract the child's margins from the available
+        // space they pass down; the table must not subtract them again. With a
+        // 500px block, 50px margins each side and wrappable content (min 200 /
+        // max 400), the table gets 400px of space: exactly max-content.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let (table, ..) = wrappable_table(
+            &mut taffy,
+            Style {
+                display: Display::Table,
+                margin: Rect {
+                    left: LengthPercentageAuto::length(50.0),
+                    right: LengthPercentageAuto::length(50.0),
+                    top: LengthPercentageAuto::ZERO,
+                    bottom: LengthPercentageAuto::ZERO,
+                },
+                ..Default::default()
+            },
+        );
+        let block = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Block,
+                    size: Size { width: Dimension::from_length(500.0), height: Dimension::AUTO },
+                    ..Default::default()
+                },
+                &[table],
+            )
+            .unwrap();
+
+        taffy.compute_layout(block, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert_eq!(
+            table_layout.size.width, 400.0,
+            "Table should get 500 - 2*50 = 400px (no double margin subtraction), got {}",
+            table_layout.size.width
+        );
+        assert_eq!(table_layout.size.height, 20.0, "Content should not wrap at 400px");
+    }
+
+    #[test]
+    fn consecutive_direct_cells_share_anonymous_row() {
+        // CSS 2.1 §17.2.1: consecutive cells without a row wrapper share ONE
+        // anonymous row — side by side, not stacked.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let cell0 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(100.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let cell1 = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size::from_lengths(150.0, 30.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let table = taffy
+            .new_with_children(
+                Style {
+                    display: Display::Table,
+                    border_spacing: Size { width: LengthPercentage::length(10.0), height: LengthPercentage::length(10.0) },
+                    ..Default::default()
+                },
+                &[cell0, cell1],
+            )
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        let cell0_layout = taffy.layout(cell0).unwrap();
+        let cell1_layout = taffy.layout(cell1).unwrap();
+
+        // One row: 3 h-gaps (10) + 100 + 150 wide, 2 v-gaps + 30 tall
+        assert_eq!(table_layout.size.width, 280.0, "Table width should be 280, got {}", table_layout.size.width);
+        assert_eq!(table_layout.size.height, 50.0, "Table height should be 50, got {}", table_layout.size.height);
+
+        // Cells are children of the table, positioned in table coordinates
+        assert_eq!(cell0_layout.location.x, 10.0);
+        assert_eq!(cell0_layout.location.y, 10.0);
+        assert_eq!(cell0_layout.size.width, 100.0);
+        assert_eq!(cell1_layout.location.x, 120.0);
+        assert_eq!(cell1_layout.location.y, 10.0);
+        assert_eq!(cell1_layout.size.width, 150.0);
+    }
+
+    #[test]
+    fn non_table_child_wrapped_as_single_cell() {
+        // A non-table child of a table is wrapped in ONE anonymous cell; its own
+        // children must not be promoted to cells/columns.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let inner_a = taffy.new_leaf(Style { size: Size::from_lengths(60.0, 10.0), ..Default::default() }).unwrap();
+        let inner_b = taffy.new_leaf(Style { size: Size::from_lengths(60.0, 10.0), ..Default::default() }).unwrap();
+        let div = taffy
+            .new_with_children(Style { display: Display::Block, ..Default::default() }, &[inner_a, inner_b])
+            .unwrap();
+        let table =
+            taffy.new_with_children(Style { display: Display::Table, ..Default::default() }, &[div]).unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let table_layout = taffy.layout(table).unwrap();
+        let div_layout = taffy.layout(div).unwrap();
+
+        // One column (60 wide), one row with two stacked 10px leaves (20 tall)
+        assert_eq!(table_layout.size.width, 60.0, "div should be one cell/column, got width {}", table_layout.size.width);
+        assert_eq!(table_layout.size.height, 20.0);
+        assert_eq!(div_layout.size.width, 60.0);
+        assert_eq!(div_layout.size.height, 20.0);
+    }
+
+    #[cfg(feature = "content_size")]
+    #[test]
+    fn content_size_propagated_from_cells() {
+        // A cell whose content overflows must report the real content size, and the
+        // table's own layout must reflect it (used for scroll ranges).
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let big = taffy.new_leaf(Style { size: Size::from_lengths(300.0, 90.0), ..Default::default() }).unwrap();
+        let cell = taffy
+            .new_with_children(
+                Style {
+                    display: Display::TableCell,
+                    size: Size { width: Dimension::from_length(100.0), height: Dimension::from_length(30.0) },
+                    ..Default::default()
+                },
+                &[big],
+            )
+            .unwrap();
+        let row =
+            taffy.new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell]).unwrap();
+        let table =
+            taffy.new_with_children(Style { display: Display::Table, ..Default::default() }, &[row]).unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        let cell_layout = taffy.layout(cell).unwrap();
+        assert_eq!(cell_layout.content_size.width, 300.0, "Cell content_size.width should be 300");
+        assert_eq!(cell_layout.content_size.height, 90.0, "Cell content_size.height should be 90");
+
+        let row_layout = taffy.layout(row).unwrap();
+        assert!(
+            row_layout.content_size.width >= 300.0,
+            "Row content_size.width should include overflowing cell content, got {}",
+            row_layout.content_size.width
+        );
+
+        let table_layout = taffy.layout(table).unwrap();
+        assert!(
+            table_layout.content_size.width >= 300.0,
+            "Table content_size.width should include overflowing cell content, got {}",
+            table_layout.content_size.width
+        );
+    }
+
+    #[test]
+    fn column_width_is_max_of_cell_widths() {
+        // The column's specified width is the max across its cells, not whichever
+        // cell came first.
+        let mut taffy: TaffyTree<()> = TaffyTree::new();
+        let cell_narrow = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size { width: Dimension::from_length(80.0), height: Dimension::from_length(20.0) },
+                ..Default::default()
+            })
+            .unwrap();
+        let cell_wide = taffy
+            .new_leaf(Style {
+                display: Display::TableCell,
+                size: Size { width: Dimension::from_length(140.0), height: Dimension::from_length(20.0) },
+                ..Default::default()
+            })
+            .unwrap();
+        let row0 =
+            taffy.new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell_narrow]).unwrap();
+        let row1 =
+            taffy.new_with_children(Style { display: Display::TableRow, ..Default::default() }, &[cell_wide]).unwrap();
+        let table = taffy
+            .new_with_children(Style { display: Display::Table, ..Default::default() }, &[row0, row1])
+            .unwrap();
+
+        taffy.compute_layout(table, Size::MAX_CONTENT).unwrap();
+
+        assert_eq!(taffy.layout(cell_narrow).unwrap().size.width, 140.0, "Column should use the max specified width");
+        assert_eq!(taffy.layout(cell_wide).unwrap().size.width, 140.0);
+    }
 }

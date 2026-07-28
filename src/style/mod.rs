@@ -723,9 +723,12 @@ impl<S: CheapCloneStr> CoreStyle for Style<S> {
     #[inline(always)]
     #[cfg(feature = "block_layout")]
     fn is_block(&self) -> bool {
+        // Display::Table is deliberately excluded: tables are block-level but are not
+        // block containers — they must not stretch-fit, be collapsed through, or share
+        // a BFC with siblings. Orphaned rows/row-groups/cells fall back to block.
         #[cfg(feature = "table_layout")]
         {
-            matches!(self.display, Display::Block | Display::Table | Display::TableRowGroup | Display::TableRow | Display::TableCell)
+            matches!(self.display, Display::Block | Display::TableRowGroup | Display::TableRow | Display::TableCell)
         }
         #[cfg(not(feature = "table_layout"))]
         {
@@ -889,7 +892,14 @@ impl<T: BlockContainerStyle> BlockContainerStyle for &'_ T {
 impl<S: CheapCloneStr> BlockItemStyle for Style<S> {
     #[inline(always)]
     fn is_table(&self) -> bool {
-        self.item_is_table
+        #[cfg(feature = "table_layout")]
+        {
+            self.item_is_table || matches!(self.display, Display::Table)
+        }
+        #[cfg(not(feature = "table_layout"))]
+        {
+            self.item_is_table
+        }
     }
 
     #[cfg(feature = "float_layout")]
