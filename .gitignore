@@ -1,3 +1,8 @@
+.claude
+.agents
+.codex
+.maki
+
 /target
 /scripts/gentest/target
 /benches/target
